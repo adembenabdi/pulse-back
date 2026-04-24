@@ -1,0 +1,880 @@
+openapi: 3.1.0
+info:
+  title: Pulse API
+  version: 0.1.0
+  description: |
+    Pulse V2 — Personal Life OS backend.
+    **Spec-first**: add every endpoint here before implementing it.
+
+servers:
+  - url: http://localhost:4000
+    description: Local dev
+  - url: https://api.pulse.app
+    description: Production (Render)
+
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        details:
+          nullable: true
+
+    BaseRecord:
+      type: object
+      required: [id, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    User:
+      allOf:
+        - $ref: '#/components/schemas/BaseRecord'
+        - type: object
+          required: [email, name]
+          properties:
+            email:
+              type: string
+              format: email
+            name:
+              type: string
+            avatar_url:
+              type: string
+              nullable: true
+            preferences:
+              type: object
+              additionalProperties: true
+              nullable: true
+
+    AuthTokens:
+      type: object
+      required: [accessToken, refreshToken]
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+
+paths:
+  # ── Auth ────────────────────────────────────────────────────────────────────
+  /api/auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password]
+              properties:
+                name:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+                timezone:
+                  type: string
+                  default: Africa/Algiers
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AuthTokens'
+                  - type: object
+                    properties:
+                      user:
+                        $ref: '#/components/schemas/User'
+        '409':
+          description: Email already in use
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in with email + password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/AuthTokens'
+                  - type: object
+                    properties:
+                      user:
+                        $ref: '#/components/schemas/User'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Get a new access token using a refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken:
+                    type: string
+        '401':
+          description: Invalid refresh token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Invalidate a session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sessionId]
+              properties:
+                sessionId:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Get the current user
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+    patch:
+      tags: [Auth]
+      summary: Update current user profile / preferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                timezone:
+                  type: string
+                preferences:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+
+  /api/auth/change-password:
+    post:
+      tags: [Auth]
+      summary: Change password (requires current password)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword:
+                  type: string
+                newPassword:
+                  type: string
+                  minLength: 8
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+
+  /api/auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Send a 6-digit reset code to email
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        '200':
+          description: Always 200 (prevents email enumeration)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+
+  /api/auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Reset password with email + 6-digit code
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, code, newPassword]
+              properties:
+                email:
+                  type: string
+                  format: email
+                code:
+                  type: string
+                  minLength: 6
+                  maxLength: 6
+                newPassword:
+                  type: string
+                  minLength: 8
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+        '400':
+          description: Invalid or expired code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /health:
+    get:
+      tags: [System]
+      summary: Health check
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  ts:
+                    type: string
+                    format: date-time
+
+  # ── Connections ─────────────────────────────────────────────────────────────
+  /api/connections/request:
+    post:
+      tags: [Connections]
+      summary: Send a connection request
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to_user_id]
+              properties:
+                to_user_id:
+                  type: string
+                  format: uuid
+                note:
+                  type: string
+      responses:
+        '201': { description: Sent }
+        '409': { description: Already requested / connected }
+
+  /api/connections/requests:
+    get:
+      tags: [Connections]
+      summary: List incoming pending connection requests
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /api/connections/requests/{id}/accept:
+    patch:
+      tags: [Connections]
+      summary: Accept a connection request
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Accepted }
+
+  /api/connections/requests/{id}/decline:
+    patch:
+      tags: [Connections]
+      summary: Decline a connection request
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Declined }
+
+  /api/connections:
+    get:
+      tags: [Connections]
+      summary: List my connections
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /api/connections/{peerId}:
+    delete:
+      tags: [Connections]
+      summary: Remove a connection
+      parameters:
+        - { name: peerId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Removed }
+
+  /api/connections/{peerId}/block:
+    patch:
+      tags: [Connections]
+      summary: Block a user
+      parameters:
+        - { name: peerId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Blocked }
+
+  /api/connections/{peerId}/unblock:
+    patch:
+      tags: [Connections]
+      summary: Unblock a user
+      parameters:
+        - { name: peerId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Unblocked }
+
+  # ── Teams ───────────────────────────────────────────────────────────────────
+  /api/teams:
+    post:
+      tags: [Teams]
+      summary: Create a team
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:        { type: string }
+                description: { type: string }
+                avatar_url:  { type: string, format: uri }
+      responses:
+        '201': { description: Created }
+    get:
+      tags: [Teams]
+      summary: List my teams
+      responses:
+        '200': { description: OK }
+
+  /api/teams/{id}:
+    get:
+      tags: [Teams]
+      summary: Get team detail + members
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: OK }
+    patch:
+      tags: [Teams]
+      summary: Update team (owner only)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:        { type: string }
+                description: { type: string }
+      responses:
+        '200': { description: OK }
+    delete:
+      tags: [Teams]
+      summary: Delete team (owner only)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Deleted }
+
+  /api/teams/{id}/invite:
+    post:
+      tags: [Teams]
+      summary: Invite a user to the team
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id: { type: string, format: uuid }
+                role:    { type: string, enum: [admin, member] }
+      responses:
+        '201': { description: Invited }
+
+  /api/teams/{id}/members/{userId}:
+    delete:
+      tags: [Teams]
+      summary: Remove a member
+      parameters:
+        - { name: id,     in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Removed }
+    patch:
+      tags: [Teams]
+      summary: Update member role
+      parameters:
+        - { name: id,     in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { type: string, enum: [admin, member] }
+      responses:
+        '200': { description: Updated }
+
+  /api/teams/{id}/leave:
+    post:
+      tags: [Teams]
+      summary: Leave a team
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Left }
+
+  # ── Organizations ───────────────────────────────────────────────────────────
+  /api/organizations:
+    post:
+      tags: [Organizations]
+      summary: Create an organization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:        { type: string }
+                description: { type: string }
+                avatar_url:  { type: string, format: uri }
+      responses:
+        '201': { description: Created }
+    get:
+      tags: [Organizations]
+      summary: List my organizations
+      responses:
+        '200': { description: OK }
+
+  /api/organizations/{id}:
+    get:
+      tags: [Organizations]
+      summary: Organization detail + members
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: OK }
+    patch:
+      tags: [Organizations]
+      summary: Update org (admin+)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:        { type: string }
+                description: { type: string }
+      responses:
+        '200': { description: OK }
+    delete:
+      tags: [Organizations]
+      summary: Delete org (owner)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Deleted }
+
+  /api/organizations/{id}/events:
+    get:
+      tags: [Organizations]
+      summary: List org events
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: OK }
+    post:
+      tags: [Organizations]
+      summary: Create an org event (admin+)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, starts_at]
+              properties:
+                title:       { type: string }
+                description: { type: string }
+                starts_at:   { type: string, format: date-time }
+                ends_at:     { type: string, format: date-time }
+                location:    { type: string }
+      responses:
+        '201': { description: Created }
+
+  /api/organizations/{id}/events/{eid}:
+    patch:
+      tags: [Organizations]
+      summary: Update event (admin+)
+      parameters:
+        - { name: id,  in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: eid, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:       { type: string }
+                description: { type: string }
+                starts_at:   { type: string, format: date-time }
+                ends_at:     { type: string, format: date-time }
+                location:    { type: string }
+      responses:
+        '200': { description: OK }
+    delete:
+      tags: [Organizations]
+      summary: Cancel event (admin+)
+      parameters:
+        - { name: id,  in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: eid, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Cancelled }
+
+  /api/organizations/{id}/events/{eid}/rsvp:
+    post:
+      tags: [Organizations]
+      summary: RSVP to an event
+      parameters:
+        - { name: id,  in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: eid, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [accepted, declined] }
+      responses:
+        '200': { description: OK }
+
+  # ── Shares ──────────────────────────────────────────────────────────────────
+  /api/shares/{entityType}/{entityId}:
+    post:
+      tags: [Shares]
+      summary: Share an entity with a user or team
+      parameters:
+        - { name: entityType, in: path, required: true, schema: { type: string } }
+        - { name: entityId,   in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [permission]
+              properties:
+                permission:   { type: string, enum: [view, comment, edit] }
+                with_user_id: { type: string, format: uuid }
+                with_team_id: { type: string, format: uuid }
+      responses:
+        '201': { description: Created }
+    get:
+      tags: [Shares]
+      summary: List shares for an entity
+      parameters:
+        - { name: entityType, in: path, required: true, schema: { type: string } }
+        - { name: entityId,   in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: OK }
+
+  /api/shares/{entityType}/{entityId}/{shareId}:
+    patch:
+      tags: [Shares]
+      summary: Update share permission
+      parameters:
+        - { name: entityType, in: path, required: true, schema: { type: string } }
+        - { name: entityId,   in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: shareId,    in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [permission]
+              properties:
+                permission: { type: string, enum: [view, comment, edit] }
+      responses:
+        '200': { description: OK }
+    delete:
+      tags: [Shares]
+      summary: Revoke a share
+      parameters:
+        - { name: entityType, in: path, required: true, schema: { type: string } }
+        - { name: entityId,   in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: shareId,    in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Revoked }
+
+  # ── Notifications ────────────────────────────────────────────────────────────
+  /api/notifications:
+    get:
+      tags: [Notifications]
+      summary: List notifications (unread first)
+      parameters:
+        - { name: limit,  in: query, schema: { type: integer, default: 50 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+        - { name: unread, in: query, schema: { type: boolean } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rows:
+                    type: array
+                    items:
+                      type: object
+                  unread_count:
+                    type: integer
+
+  /api/notifications/read-all:
+    post:
+      tags: [Notifications]
+      summary: Mark all notifications as read
+      responses:
+        '200': { description: OK }
+
+  /api/notifications/{id}/read:
+    patch:
+      tags: [Notifications]
+      summary: Mark a notification as read
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: OK }
+
+  /api/notifications/{id}:
+    delete:
+      tags: [Notifications]
+      summary: Delete a notification
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Deleted }
+
+  /api/notifications/push/subscribe:
+    post:
+      tags: [Notifications]
+      summary: Register a push subscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint, p256dh, auth]
+              properties:
+                endpoint: { type: string, format: uri }
+                p256dh:   { type: string }
+                auth:     { type: string }
+      responses:
+        '201': { description: Subscribed }
+    delete:
+      tags: [Notifications]
+      summary: Unregister a push subscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [endpoint]
+              properties:
+                endpoint: { type: string }
+      responses:
+        '200': { description: Unsubscribed }
+
+  /api/notifications/preferences:
+    get:
+      tags: [Notifications]
+      summary: Get notification preferences
+      responses:
+        '200': { description: OK }
+    put:
+      tags: [Notifications]
+      summary: Update notification preferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                channels:
+                  type: object
+                  additionalProperties:
+                    type: object
+                    properties:
+                      in_app:   { type: boolean }
+                      push:     { type: boolean }
+                      telegram: { type: boolean }
+                      email:    { type: boolean }
+                quiet_start: { type: string, nullable: true }
+                quiet_end:   { type: string, nullable: true }
+      responses:
+        '200': { description: OK }
+
