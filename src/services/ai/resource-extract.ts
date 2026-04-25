@@ -55,14 +55,12 @@ interface OEmbedResponse {
  * These all work without authentication.
  */
 const OEMBED_PROVIDERS: Array<{ pattern: RegExp; endpoint: string }> = [
-  { pattern: /youtube\.com|youtu\.be/,        endpoint: 'https://www.youtube.com/oembed' },
-  { pattern: /vimeo\.com/,                    endpoint: 'https://vimeo.com/api/oembed.json' },
-  { pattern: /twitter\.com|x\.com/,           endpoint: 'https://publish.twitter.com/oembed' },
-  { pattern: /tiktok\.com/,                   endpoint: 'https://www.tiktok.com/oembed' },
-  { pattern: /soundcloud\.com/,               endpoint: 'https://soundcloud.com/oembed' },
-  { pattern: /open\.spotify\.com/,            endpoint: 'https://open.spotify.com/oembed' },
-  { pattern: /threads\.net/,                  endpoint: 'https://www.threads.net/oembed' },
-  { pattern: /instagram\.com/,               endpoint: 'https://graph.facebook.com/v18.0/instagram_oembed' },
+  { pattern: /youtube\.com|youtu\.be/,  endpoint: 'https://www.youtube.com/oembed' },
+  { pattern: /vimeo\.com/,              endpoint: 'https://vimeo.com/api/oembed.json' },
+  { pattern: /twitter\.com|x\.com/,    endpoint: 'https://publish.twitter.com/oembed' },
+  { pattern: /tiktok\.com/,            endpoint: 'https://www.tiktok.com/oembed' },
+  { pattern: /soundcloud\.com/,        endpoint: 'https://soundcloud.com/oembed' },
+  { pattern: /open\.spotify\.com/,     endpoint: 'https://open.spotify.com/oembed' },
 ];
 
 async function tryOEmbed(url: string): Promise<{ title: string; description: string } | null> {
@@ -80,13 +78,44 @@ async function tryOEmbed(url: string): Promise<{ title: string; description: str
     clearTimeout(timeout);
     if (!res.ok) return null;
     const data = await res.json() as OEmbedResponse;
+    // Extract plain text from the embedded HTML if present
+    const htmlText = data.html
+      ? data.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500)
+      : '';
     const title = data.title ?? '';
-    // Strip HTML from oembed html field to get a plain description snippet
-    const description = data.author_name ? `By ${data.author_name}` : '';
+    const description = htmlText || (data.author_name ? `By ${data.author_name}` : '');
     return { title, description };
   } catch {
     return null;
   }
+}
+
+/**
+ * Threads and Instagram serve full SSR content (including post text in og:description)
+ * when the request comes from Meta's own crawler user agent.
+ */
+async function fetchSocialPage(url: string): Promise<string> {
+  const agents = [
+    'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+    'Twitterbot/1.0',
+    'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+  ];
+  for (const ua of agents) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10_000);
+      const res = await fetch(url, {
+        signal:  controller.signal,
+        headers: { 'User-Agent': ua },
+      });
+      clearTimeout(timeout);
+      if (!res.ok) continue;
+      const html = await res.text();
+      // Check we got actual content, not a login wall
+      if (html.includes('og:description') || html.includes('og:title')) return html;
+    } catch { /* try next */ }
+  }
+  return '';
 }
 
 /**
@@ -136,12 +165,32 @@ function extractMeta(html: string, sourceUrl: string): { title: string; descript
 }
 
 export async function extractResourceFromUrl(url: string): Promise<ExtractedResource> {
-  // ── Step 1: try oEmbed for known platforms (no scraping needed) ───────────
-  const oEmbed = await tryOEmbed(url);
+  const isSocial = /threads\.net|instagram\.com/.test(url);
 
-  // ── Step 2: fetch page HTML for meta tags (skip if oEmbed succeeded) ──────
+  // ── Step 1: fetch HTML ────────────────────────────────────────────────────
+  // Social sites need special crawler user agents to get SSR content with post text
   let html = '';
-  if (!oEmbed) {
+  if (isSocial) {
+    html = await fetchSocialPage(url);
+  } else {
+    // Try oEmbed first for known platforms (YouTube, Twitter, etc.)
+    const oEmbed = await tryOEmbed(url);
+    if (oEmbed) {
+      // If oEmbed gave us real content, skip scraping unless AI can enrich it
+      if (!isGroqAvailable() || !oEmbed.description) {
+        return { title: oEmbed.title, description: oEmbed.description, url, tags: [], source_url: url };
+      }
+      // Feed oEmbed content into AI for tags
+      const result = await tryAiEnrich(`Source URL: ${url}\n\n${oEmbed.title}\n${oEmbed.description}`);
+      return {
+        title:       result?.title       || oEmbed.title,
+        description: result?.description || oEmbed.description,
+        url:         result?.url         || url,
+        tags:        result?.tags        ?? [],
+        source_url:  url,
+      };
+    }
+    // Regular page scrape
     try {
       const controller = new AbortController();
       const timeout    = setTimeout(() => controller.abort(), 10_000);
@@ -156,11 +205,15 @@ export async function extractResourceFromUrl(url: string): Promise<ExtractedReso
     }
   }
 
-  const meta = oEmbed ?? (html ? extractMeta(html, url) : describeFromUrl(url));
+  // ── Step 2: extract meta tags ─────────────────────────────────────────────
+  const meta = html ? extractMeta(html, url) : describeFromUrl(url);
 
-  // ── Step 3: if Groq is available, enrich with AI ─────────────────────────
-  if (isGroqAvailable() && html) {
-    const pageText = html
+  // ── Step 3: build page text for AI ───────────────────────────────────────
+  // For social pages we only use meta description (that's where post text lives)
+  // For regular pages we also strip and pass body text
+  const pageText = isSocial
+    ? `Post URL: ${url}\nTitle: ${meta.title}\nContent: ${meta.description}`
+    : html
       .replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
       .replace(/<[^>]+>/g, ' ')
@@ -168,42 +221,49 @@ export async function extractResourceFromUrl(url: string): Promise<ExtractedReso
       .trim()
       .slice(0, 4000);
 
-    try {
-      const result = await groqChat(
-        [
-          { role: 'system', content: EXTRACT_PROMPT },
-          { role: 'user',   content: `Source URL: ${url}\n\nPage content:\n${pageText}` },
-        ],
-        { temperature: 0.3, maxTokens: 500, jsonMode: true },
-      );
-
-      let parsed: { title?: string; description?: string; url?: string; tags?: string[] };
-      try {
-        parsed = JSON.parse(result.content);
-      } catch {
-        const m = result.content.match(/\{[\s\S]*\}/);
-        if (!m) throw new Error('AI returned invalid JSON');
-        parsed = JSON.parse(m[0]);
-      }
-
+  // ── Step 4: AI enrichment ─────────────────────────────────────────────────
+  if (isGroqAvailable() && pageText) {
+    const result = await tryAiEnrich(`Source URL: ${url}\n\n${pageText}`);
+    if (result) {
       return {
-        title:       parsed.title       || meta.title,
-        description: parsed.description || meta.description,
-        url:         parsed.url         || url,
-        tags:        Array.isArray(parsed.tags) ? parsed.tags : [],
+        title:       result.title       || meta.title,
+        description: result.description || meta.description,
+        url:         result.url         || url,
+        tags:        result.tags        ?? [],
         source_url:  url,
       };
-    } catch (err) {
-      logger.warn({ err, url }, 'extractResourceFromUrl: AI enrichment failed — falling back to meta tags');
     }
   }
 
-  // ── Fallback: return whatever we have ────────────────────────────────────
-  return {
-    title:       meta.title,
-    description: meta.description,
-    url,
-    tags:        [],
-    source_url:  url,
-  };
+  // ── Fallback ──────────────────────────────────────────────────────────────
+  return { title: meta.title, description: meta.description, url, tags: [], source_url: url };
+}
+
+async function tryAiEnrich(content: string): Promise<{ title: string; description: string; url: string; tags: string[] } | null> {
+  try {
+    const result = await groqChat(
+      [
+        { role: 'system', content: EXTRACT_PROMPT },
+        { role: 'user',   content },
+      ],
+      { temperature: 0.3, maxTokens: 500, jsonMode: true },
+    );
+    let parsed: { title?: string; description?: string; url?: string; tags?: string[] };
+    try {
+      parsed = JSON.parse(result.content);
+    } catch {
+      const m = result.content.match(/\{[\s\S]*\}/);
+      if (!m) return null;
+      parsed = JSON.parse(m[0]);
+    }
+    return {
+      title:       parsed.title       ?? '',
+      description: parsed.description ?? '',
+      url:         parsed.url         ?? '',
+      tags:        Array.isArray(parsed.tags) ? parsed.tags : [],
+    };
+  } catch (err) {
+    logger.warn({ err }, 'tryAiEnrich failed');
+    return null;
+  }
 }
