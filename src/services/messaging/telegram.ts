@@ -23,7 +23,6 @@ import { extractItems }        from '../ai/extract.js';
 import { dispatchProposals }   from '../ai/dispatch.js';
 import { generateMorningBriefing, generateEveningRecap } from '../ai/briefings.js';
 import { extractResourceFromUrl, findUrl } from '../ai/resource-extract.js';
-import { isGroqAvailable }     from '../ai/groq.js';
 import { db, scoped }          from '../../lib/db.js';
 import { logger }              from '../../lib/logger.js';
 
@@ -147,9 +146,9 @@ async function handleMessage(msg: TelegramBot.Message): Promise<void> {
     return;
   }
 
-  // ── URL shared → save as resource (AI-enriched) ──────────────────────────
+  // ── URL shared → save as resource (meta tags always, AI-enriched if available) ──
   const sharedUrl = findUrl(text);
-  if (sharedUrl && isGroqAvailable()) {
+  if (sharedUrl) {
     try {
       await bot.sendChatAction(chatId, 'typing');
       const r = await extractResourceFromUrl(sharedUrl);
@@ -162,9 +161,10 @@ async function handleMessage(msg: TelegramBot.Message): Promise<void> {
          r.tags.length ? JSON.stringify(r.tags) : null],
       );
       const tagsLine = r.tags.length ? `\n🏷  ${r.tags.join(', ')}` : '';
+      const descLine = r.description ? `\n${r.description}` : '';
       await bot.sendMessage(
         chatId,
-        `🔗 *Saved to Resources*\n\n*${finalTitle}*\n${r.description || ''}${tagsLine}`,
+        `🔗 *Saved to Resources*\n\n*${finalTitle}*${descLine}${tagsLine}`,
         { parse_mode: 'Markdown', disable_web_page_preview: true },
       );
       return;

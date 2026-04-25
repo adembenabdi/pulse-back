@@ -41,10 +41,29 @@ export function findUrl(text: string): string | null {
   return m ? m[0] : null;
 }
 
-export async function extractResourceFromUrl(url: string): Promise<ExtractedResource> {
-  if (!isGroqAvailable()) throw new Error('AI service not configured');
+/** Scrape Open Graph / meta tags from raw HTML. */
+function extractMeta(html: string, sourceUrl: string): { title: string; description: string } {
+  const get = (pattern: RegExp) => {
+    const m = html.match(pattern);
+    return m ? m[1].replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim() : '';
+  };
+  const title =
+    get(/property=["']og:title["'][^>]*content=["']([^"']+)["']/i) ||
+    get(/content=["']([^"']+)["'][^>]*property=["']og:title["']/i) ||
+    get(/<title[^>]*>([^<]+)<\/title>/i) ||
+    sourceUrl;
+  const description =
+    get(/property=["']og:description["'][^>]*content=["']([^"']+)["']/i) ||
+    get(/content=["']([^"']+)["'][^>]*property=["']og:description["']/i) ||
+    get(/name=["']description["'][^>]*content=["']([^"']+)["']/i) ||
+    get(/content=["']([^"']+)["'][^>]*name=["']description["']/i) ||
+    '';
+  return { title, description };
+}
 
-  let pageText = '';
+export async function extractResourceFromUrl(url: string): Promise<ExtractedResource> {
+  // ── Step 1: always fetch and get meta tags (no AI required) ──────────────
+  let html = '';
   try {
     const controller = new AbortController();
     const timeout    = setTimeout(() => controller.abort(), 10_000);
@@ -53,41 +72,59 @@ export async function extractResourceFromUrl(url: string): Promise<ExtractedReso
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PulseBot/1.0)' },
     });
     clearTimeout(timeout);
-    const html = await response.text();
-    pageText = html
+    html = await response.text();
+  } catch (err) {
+    logger.warn({ err, url }, 'extractResourceFromUrl: failed to fetch URL');
+  }
+
+  const meta = extractMeta(html, url);
+
+  // ── Step 2: if Groq is available, enrich with AI ─────────────────────────
+  if (isGroqAvailable() && html) {
+    const pageText = html
       .replace(/<script[\s\S]*?<\/script>/gi, '')
       .replace(/<style[\s\S]*?<\/style>/gi, '')
       .replace(/<[^>]+>/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, 4000);
-  } catch (err) {
-    logger.warn({ err, url }, 'extractResourceFromUrl: failed to fetch URL');
-    pageText = `URL: ${url}`;
+
+    try {
+      const result = await groqChat(
+        [
+          { role: 'system', content: EXTRACT_PROMPT },
+          { role: 'user',   content: `Source URL: ${url}\n\nPage content:\n${pageText}` },
+        ],
+        { temperature: 0.3, maxTokens: 500, jsonMode: true },
+      );
+
+      let parsed: { title?: string; description?: string; url?: string; tags?: string[] };
+      try {
+        parsed = JSON.parse(result.content);
+      } catch {
+        const m = result.content.match(/\{[\s\S]*\}/);
+        if (!m) throw new Error('AI returned invalid JSON');
+        parsed = JSON.parse(m[0]);
+      }
+
+      return {
+        title:       parsed.title       || meta.title,
+        description: parsed.description || meta.description,
+        url:         parsed.url         || url,
+        tags:        Array.isArray(parsed.tags) ? parsed.tags : [],
+        source_url:  url,
+      };
+    } catch (err) {
+      logger.warn({ err, url }, 'extractResourceFromUrl: AI enrichment failed — falling back to meta tags');
+    }
   }
 
-  const result = await groqChat(
-    [
-      { role: 'system', content: EXTRACT_PROMPT },
-      { role: 'user',   content: `Source URL: ${url}\n\nPage content:\n${pageText}` },
-    ],
-    { temperature: 0.3, maxTokens: 500, jsonMode: true },
-  );
-
-  let parsed: { title?: string; description?: string; url?: string; tags?: string[] };
-  try {
-    parsed = JSON.parse(result.content);
-  } catch {
-    const m = result.content.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error('AI returned invalid JSON');
-    parsed = JSON.parse(m[0]);
-  }
-
+  // ── Fallback: return meta tags only ──────────────────────────────────────
   return {
-    title:       parsed.title       ?? '',
-    description: parsed.description ?? '',
-    url:         parsed.url         || url,
-    tags:        Array.isArray(parsed.tags) ? parsed.tags : [],
+    title:       meta.title,
+    description: meta.description,
+    url,
+    tags:        [],
     source_url:  url,
   };
 }
