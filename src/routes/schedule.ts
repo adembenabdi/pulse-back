@@ -195,9 +195,16 @@ scheduleRouter.post('/timetable/sync', async (req, res, next) => {
     );
     if (!tt) throw new AppError(404, 'No timetable configured. Use PUT /api/schedule/timetable first.');
 
-    // Service handles last_synced + parser_config (hash) updates internally
+    // Clear last_hash so manual sync always re-processes regardless of feed content
+    const config = (tt.parser_config ?? {}) as Record<string, unknown>;
+    delete config['last_hash'];
+    await req.db.query(
+      `UPDATE university_timetables SET parser_config = $1 WHERE user_id = $2`,
+      [JSON.stringify(config), req.user.id],
+    );
+
     const { syncTimetable } = await import('../services/timetable.js');
-    const result = await syncTimetable(req.user.id, tt.url, tt.parser_config, req.db);
+    const result = await syncTimetable(req.user.id, tt.url, config, req.db);
     res.json(result);
   } catch (err) { next(err); }
 });
