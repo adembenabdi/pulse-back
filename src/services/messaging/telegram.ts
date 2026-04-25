@@ -226,14 +226,34 @@ async function handleStart(chatId: string, user: { id: string; name: string } | 
     return;
   }
 
-  await bot.sendMessage(
-    chatId,
-    `👋 *Welcome to Pulse!*\n\n` +
-    `To link your account, send:\n` +
-    `\`/link your@email.com\`\n\n` +
-    `Once linked, you'll get morning briefings, prayer reminders, task alerts and more.`,
-    { parse_mode: 'Markdown' },
-  );
+  // Generate a short-lived link token so the user can paste it in Settings → Integrations
+  try {
+    // Clean up any existing pending token for this chat before creating a new one
+    await db.admin.query(
+      `DELETE FROM telegram_link_tokens WHERE chat_id = $1`,
+      [chatId],
+    );
+    const { rows: [row] } = await db.admin.query<{ token: string }>(
+      `INSERT INTO telegram_link_tokens (chat_id, expires_at)
+       VALUES ($1, NOW() + INTERVAL '15 minutes')
+       RETURNING token`,
+      [chatId],
+    );
+    const token = row?.token;
+    if (!token) throw new Error('Token generation failed');
+
+    await bot.sendMessage(
+      chatId,
+      `👋 *Welcome to Pulse!*\n\n` +
+      `Copy the token below and paste it in *Settings → Integrations → Telegram*:\n\n` +
+      `\`${token}\`\n\n` +
+      `_This token expires in 15 minutes._`,
+      { parse_mode: 'Markdown' },
+    );
+  } catch (err) {
+    logger.error(err, 'Failed to generate Telegram link token');
+    await bot.sendMessage(chatId, '⚠️ Could not generate a link token. Please try again.');
+  }
 }
 
 // ── /link <email> handler ─────────────────────────────────────────────────────
