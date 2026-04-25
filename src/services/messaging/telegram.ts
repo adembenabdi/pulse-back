@@ -45,9 +45,16 @@ export function initTelegramBot(): void {
   const webhookUrl = process.env['TELEGRAM_WEBHOOK_URL'];
 
   if (webhookUrl) {
-    // Production: webhook mode — no polling
+    // Production: webhook mode — register webhook with Telegram on every startup
     bot = new TelegramBot(token, { polling: false });
-    logger.info({ webhookUrl }, 'Telegram bot initialized in webhook mode');
+    const webhookSecret = process.env['TELEGRAM_WEBHOOK_SECRET'];
+    bot.setWebhook(webhookUrl, {
+      ...(webhookSecret ? { secret_token: webhookSecret } : {}),
+    }).then(() => {
+      logger.info({ webhookUrl }, 'Telegram webhook registered');
+    }).catch((err: unknown) => {
+      logger.error(err, 'Failed to register Telegram webhook');
+    });
   } else {
     // Development: long-polling
     bot = new TelegramBot(token, { polling: true });
