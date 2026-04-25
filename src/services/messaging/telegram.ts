@@ -48,7 +48,7 @@ export function initTelegramBot(): void {
     // Production: webhook mode — register webhook with Telegram on every startup
     bot = new TelegramBot(token, { polling: false });
     const webhookSecret = process.env['TELEGRAM_WEBHOOK_SECRET'];
-    bot.setWebhook(webhookUrl, {
+    bot.setWebHook(webhookUrl, {
       ...(webhookSecret ? { secret_token: webhookSecret } : {}),
     }).then(() => {
       logger.info({ webhookUrl }, 'Telegram webhook registered');
