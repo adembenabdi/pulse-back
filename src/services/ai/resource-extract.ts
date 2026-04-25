@@ -45,7 +45,7 @@ export function findUrl(text: string): string | null {
 function extractMeta(html: string, sourceUrl: string): { title: string; description: string } {
   const get = (pattern: RegExp) => {
     const m = html.match(pattern);
-    return m ? m[1].replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim() : '';
+    return m && m[1] ? m[1].replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim() : '';
   };
   const title =
     get(/property=["']og:title["'][^>]*content=["']([^"']+)["']/i) ||
