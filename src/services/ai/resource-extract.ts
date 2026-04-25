@@ -41,6 +41,80 @@ export function findUrl(text: string): string | null {
   return m ? m[0] : null;
 }
 
+// ── oEmbed support ────────────────────────────────────────────────────────────
+
+interface OEmbedResponse {
+  title?:        string;
+  author_name?:  string;
+  html?:         string;
+  thumbnail_url?: string;
+}
+
+/**
+ * Maps URL patterns to their oEmbed endpoint.
+ * These all work without authentication.
+ */
+const OEMBED_PROVIDERS: Array<{ pattern: RegExp; endpoint: string }> = [
+  { pattern: /youtube\.com|youtu\.be/,        endpoint: 'https://www.youtube.com/oembed' },
+  { pattern: /vimeo\.com/,                    endpoint: 'https://vimeo.com/api/oembed.json' },
+  { pattern: /twitter\.com|x\.com/,           endpoint: 'https://publish.twitter.com/oembed' },
+  { pattern: /tiktok\.com/,                   endpoint: 'https://www.tiktok.com/oembed' },
+  { pattern: /soundcloud\.com/,               endpoint: 'https://soundcloud.com/oembed' },
+  { pattern: /open\.spotify\.com/,            endpoint: 'https://open.spotify.com/oembed' },
+  { pattern: /threads\.net/,                  endpoint: 'https://www.threads.net/oembed' },
+  { pattern: /instagram\.com/,               endpoint: 'https://graph.facebook.com/v18.0/instagram_oembed' },
+];
+
+async function tryOEmbed(url: string): Promise<{ title: string; description: string } | null> {
+  const provider = OEMBED_PROVIDERS.find(p => p.pattern.test(url));
+  if (!provider) return null;
+
+  try {
+    const endpoint = `${provider.endpoint}?url=${encodeURIComponent(url)}&format=json`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8_000);
+    const res = await fetch(endpoint, {
+      signal: controller.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PulseBot/1.0)' },
+    });
+    clearTimeout(timeout);
+    if (!res.ok) return null;
+    const data = await res.json() as OEmbedResponse;
+    const title = data.title ?? '';
+    // Strip HTML from oembed html field to get a plain description snippet
+    const description = data.author_name ? `By ${data.author_name}` : '';
+    return { title, description };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * For URLs where scraping is blocked and oEmbed fails,
+ * build a minimal description from the URL path itself.
+ */
+function describeFromUrl(url: string): { title: string; description: string } {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split('/').filter(Boolean);
+    // e.g. threads.net/@username/post/abc → "Post by @username"
+    if (u.hostname.includes('threads.net') || u.hostname.includes('instagram.com')) {
+      const username = parts.find(p => p.startsWith('@')) ?? parts[0] ?? '';
+      return {
+        title:       `${u.hostname.includes('threads') ? 'Threads' : 'Instagram'} post${username ? ` by ${username}` : ''}`,
+        description: `Shared from ${u.hostname}`,
+      };
+    }
+    const slug = parts[parts.length - 1]?.replace(/[-_]/g, ' ') ?? '';
+    return {
+      title:       slug ? slug.charAt(0).toUpperCase() + slug.slice(1) : u.hostname,
+      description: `From ${u.hostname}`,
+    };
+  } catch {
+    return { title: url, description: '' };
+  }
+}
+
 /** Scrape Open Graph / meta tags from raw HTML. */
 function extractMeta(html: string, sourceUrl: string): { title: string; description: string } {
   const get = (pattern: RegExp) => {
@@ -62,24 +136,29 @@ function extractMeta(html: string, sourceUrl: string): { title: string; descript
 }
 
 export async function extractResourceFromUrl(url: string): Promise<ExtractedResource> {
-  // ── Step 1: always fetch and get meta tags (no AI required) ──────────────
+  // ── Step 1: try oEmbed for known platforms (no scraping needed) ───────────
+  const oEmbed = await tryOEmbed(url);
+
+  // ── Step 2: fetch page HTML for meta tags (skip if oEmbed succeeded) ──────
   let html = '';
-  try {
-    const controller = new AbortController();
-    const timeout    = setTimeout(() => controller.abort(), 10_000);
-    const response   = await fetch(url, {
-      signal:  controller.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PulseBot/1.0)' },
-    });
-    clearTimeout(timeout);
-    html = await response.text();
-  } catch (err) {
-    logger.warn({ err, url }, 'extractResourceFromUrl: failed to fetch URL');
+  if (!oEmbed) {
+    try {
+      const controller = new AbortController();
+      const timeout    = setTimeout(() => controller.abort(), 10_000);
+      const response   = await fetch(url, {
+        signal:  controller.signal,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PulseBot/1.0)' },
+      });
+      clearTimeout(timeout);
+      html = await response.text();
+    } catch (err) {
+      logger.warn({ err, url }, 'extractResourceFromUrl: failed to fetch URL');
+    }
   }
 
-  const meta = extractMeta(html, url);
+  const meta = oEmbed ?? (html ? extractMeta(html, url) : describeFromUrl(url));
 
-  // ── Step 2: if Groq is available, enrich with AI ─────────────────────────
+  // ── Step 3: if Groq is available, enrich with AI ─────────────────────────
   if (isGroqAvailable() && html) {
     const pageText = html
       .replace(/<script[\s\S]*?<\/script>/gi, '')
@@ -119,7 +198,7 @@ export async function extractResourceFromUrl(url: string): Promise<ExtractedReso
     }
   }
 
-  // ── Fallback: return meta tags only ──────────────────────────────────────
+  // ── Fallback: return whatever we have ────────────────────────────────────
   return {
     title:       meta.title,
     description: meta.description,
