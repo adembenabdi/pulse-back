@@ -22,6 +22,11 @@ export function getGroqClient(): Groq {
   return _client;
 }
 
+/** Returns true if GROQ_API_KEY is set and usable. */
+export function isGroqAvailable(): boolean {
+  return Boolean(API_KEY);
+}
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
@@ -65,8 +70,4 @@ export async function groqChat(
     logger.error(err, 'groqChat error');
     throw err;
   }
-}
-
-export function isGroqAvailable(): boolean {
-  return Boolean(API_KEY);
 }

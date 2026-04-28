@@ -5,6 +5,9 @@
  */
 import { config } from 'dotenv';
 
+// Prevent index.ts from auto-starting the server on port 4000 when imported
+process.env['NODE_ENV'] = 'test';
+
 // Load .env.test first, fall back to .env
 config({ path: '.env.test', override: false });
 config({ path: '.env',      override: false });

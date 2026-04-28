@@ -32,6 +32,7 @@ import { initCronJobs }      from './services/scheduler.js';
 import { searchRouter }      from './routes/search.js';
 import { overviewRouter }    from './routes/overview.js';
 import { settingsRouter }    from './routes/settings.js';
+import { linksRouter }       from './routes/links.js';
 
 const app: Express = express();
 
@@ -86,29 +87,35 @@ app.use('/api/push',         pushRouter);
 app.use('/api/search',       searchRouter);
 app.use('/api/overview',     overviewRouter);
 app.use('/api/settings',     settingsRouter);
+// Graph — Universal Entity Relationship Layer
+app.use('/api/links',        linksRouter);
 
 // ── Error handler (must be last) ──────────────────────────────────────────────
 app.use(errorHandler);
 
 const PORT = Number(process.env['PORT'] ?? 4000);
-app.listen(PORT, async () => {
-  logger.info(`pulse-backend listening on http://localhost:${PORT}`);
 
-  // ── DB health check ─────────────────────────────────────────────────────────
-  try {
-    const { rows } = await pool.query<{ now: Date; db: string }>(
-      'SELECT NOW() AS now, current_database() AS db',
-    );
-    logger.info(
-      { db: rows[0]?.db, time: rows[0]?.now },
-      '✓ Database connected',
-    );
-  } catch (err) {
-    logger.error({ err }, '✗ Database connection FAILED — check DATABASE_URL in .env');
-  }
+// Don't auto-start the server when imported by tests (each test calls app.listen(0))
+if (process.env['NODE_ENV'] !== 'test') {
+  app.listen(PORT, async () => {
+    logger.info(`pulse-backend listening on http://localhost:${PORT}`);
 
-  initTelegramBot();
-  initCronJobs();
-});
+    // ── DB health check ─────────────────────────────────────────────────────────
+    try {
+      const { rows } = await pool.query<{ now: Date; db: string }>(
+        'SELECT NOW() AS now, current_database() AS db',
+      );
+      logger.info(
+        { db: rows[0]?.db, time: rows[0]?.now },
+        '✓ Database connected',
+      );
+    } catch (err) {
+      logger.error({ err }, '✗ Database connection FAILED — check DATABASE_URL in .env');
+    }
+
+    initTelegramBot();
+    initCronJobs();
+  });
+}
 
 export { app };

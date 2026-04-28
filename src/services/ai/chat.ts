@@ -15,10 +15,11 @@
  *   add_resource       — adds a row to resources
  */
 
-import Groq                   from 'groq-sdk';
-import { getGroqClient }      from './groq.js';
-import { db }                 from '../../lib/db.js';
-import { logger }             from '../../lib/logger.js';
+import Groq                              from 'groq-sdk';
+import { getGroqClient }               from './groq.js';
+import { db }                          from '../../lib/db.js';
+import { logger }                      from '../../lib/logger.js';
+import { suggestLinks, persistSuggestions, type NewEntityContext } from './link-suggest.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -199,7 +200,13 @@ async function executeTool(
       );
       const row = rows[0]!;
       await logAction(userId, convId, 'create_task', 'items', row.id, args);
-      return `Created task: "${row.title}" (id: ${row.id})`;
+      const ctx: NewEntityContext = { type: 'item', id: row.id, title: row.title, description: args.description ?? null };
+      const suggestions = await suggestLinks(userId, ctx);
+      await persistSuggestions(userId, ctx, suggestions);
+      const sugStr = suggestions.length
+        ? ` Suggested links: ${suggestions.map(s => `${s.relation} → ${s.target_type}:${s.target_id} (${Math.round(s.confidence * 100)}%)`).join('; ')}.`
+        : '';
+      return `Created task: "${row.title}" (id: ${row.id}).${sugStr}`;
     }
 
     case 'create_idea': {
@@ -209,7 +216,13 @@ async function executeTool(
       );
       const row = rows[0]!;
       await logAction(userId, convId, 'create_idea', 'ideas', row.id, args);
-      return `Saved idea: "${row.title}"`;
+      const ctx: NewEntityContext = { type: 'idea', id: row.id, title: row.title, description: args.description ?? null };
+      const suggestions = await suggestLinks(userId, ctx);
+      await persistSuggestions(userId, ctx, suggestions);
+      const sugStr = suggestions.length
+        ? ` Suggested links: ${suggestions.map(s => `${s.relation} → ${s.target_type}:${s.target_id} (${Math.round(s.confidence * 100)}%)`).join('; ')}.`
+        : '';
+      return `Saved idea: "${row.title}".${sugStr}`;
     }
 
     case 'create_event': {
@@ -220,6 +233,9 @@ async function executeTool(
       );
       const row = rows[0]!;
       await logAction(userId, convId, 'create_event', 'calendar_items', row.id, args);
+      const ctx: NewEntityContext = { type: 'calendar_item', id: row.id, title: row.title, description: args.notes ?? null };
+      const suggestions = await suggestLinks(userId, ctx);
+      await persistSuggestions(userId, ctx, suggestions);
       return `Added event: "${row.title}" at ${args.start_at}`;
     }
 
@@ -251,6 +267,9 @@ async function executeTool(
       );
       const row = rows[0]!;
       await logAction(userId, convId, 'create_note', 'notes', row.id, args);
+      const ctx: NewEntityContext = { type: 'item', id: row.id, title: args.title ?? 'Quick note', description: args.content ?? null };
+      const suggestions = await suggestLinks(userId, ctx);
+      await persistSuggestions(userId, ctx, suggestions);
       return `Note saved`;
     }
 
@@ -262,6 +281,9 @@ async function executeTool(
       );
       const row = rows[0]!;
       await logAction(userId, convId, 'add_resource', 'resources', row.id, args);
+      const ctx: NewEntityContext = { type: 'resource', id: row.id, title: row.title ?? args.url ?? '', description: args.description ?? null };
+      const suggestions = await suggestLinks(userId, ctx);
+      await persistSuggestions(userId, ctx, suggestions);
       return `Bookmarked: "${row.title}"`;
     }
 

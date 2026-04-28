@@ -78,6 +78,161 @@ components:
         refreshToken:
           type: string
 
+    # ── Graph / Links schemas ─────────────────────────────────────────────────
+
+    EntityType:
+      type: string
+      enum:
+        - item
+        - idea
+        - objective
+        - calendar_item
+        - habit
+        - recipe
+        - meal_plan
+        - study_session
+        - gym_session
+        - transaction
+        - freelance_gig
+        - freelance_client
+        - resource
+        - person
+
+    Relation:
+      type: string
+      enum:
+        - depends_on
+        - blocks
+        - contributes_to
+        - uses
+        - related_to
+        - references
+        - mentions_person
+        - custom
+
+    EntityPreview:
+      type: object
+      required: [type, id, title, href]
+      properties:
+        type:     { $ref: '#/components/schemas/EntityType' }
+        id:       { type: string, format: uuid }
+        title:    { type: string }
+        subtitle: { type: string, nullable: true }
+        date:     { type: string, format: date-time, nullable: true }
+        href:     { type: string }
+
+    EntityLink:
+      allOf:
+        - $ref: '#/components/schemas/BaseRecord'
+        - type: object
+          required: [user_id, source_type, source_id, target_type, target_id, relation, created_by]
+          properties:
+            user_id:     { type: string, format: uuid }
+            source_type: { $ref: '#/components/schemas/EntityType' }
+            source_id:   { type: string, format: uuid }
+            target_type: { $ref: '#/components/schemas/EntityType' }
+            target_id:   { type: string, format: uuid }
+            relation:    { $ref: '#/components/schemas/Relation' }
+            label:       { type: string, nullable: true }
+            weight:      { type: integer, minimum: 1, maximum: 10, default: 1 }
+            metadata:    { type: object, additionalProperties: true }
+            created_by:
+              type: string
+              enum: [user, ai, system]
+
+    UnifiedEdge:
+      type: object
+      required: [source_type, source_id, target_type, target_id, relation, source_table]
+      properties:
+        source_type:    { $ref: '#/components/schemas/EntityType' }
+        source_id:      { type: string, format: uuid }
+        target_type:    { $ref: '#/components/schemas/EntityType' }
+        target_id:      { type: string, format: uuid }
+        relation:       { $ref: '#/components/schemas/Relation' }
+        label:          { type: string, nullable: true }
+        weight:         { type: integer }
+        metadata:       { type: object, additionalProperties: true }
+        created_by:     { type: string }
+        created_at:     { type: string, format: date-time }
+        source_table:   { type: string }
+        link_id:        { type: string, format: uuid, nullable: true }
+        source_preview: { $ref: '#/components/schemas/EntityPreview' }
+        target_preview: { $ref: '#/components/schemas/EntityPreview' }
+
+    CreateLinkInput:
+      type: object
+      required: [source, target, relation]
+      properties:
+        source:
+          type: object
+          required: [type, id]
+          properties:
+            type: { $ref: '#/components/schemas/EntityType' }
+            id:   { type: string, format: uuid }
+        target:
+          type: object
+          required: [type, id]
+          properties:
+            type: { $ref: '#/components/schemas/EntityType' }
+            id:   { type: string, format: uuid }
+        relation: { $ref: '#/components/schemas/Relation' }
+        label:    { type: string, description: "Required when relation is 'custom'" }
+        metadata: { type: object, additionalProperties: true }
+
+    GraphNode:
+      type: object
+      required: [id, type, entityId, title]
+      properties:
+        id:       { type: string, description: "${type}:${entityId}" }
+        type:     { type: string }
+        entityId: { type: string, format: uuid }
+        title:    { type: string }
+        subtitle: { type: string, nullable: true }
+        href:     { type: string, nullable: true }
+        matched:  { type: boolean, description: "Set on search/graph results" }
+
+    GraphEdge:
+      type: object
+      required: [id, source, target, relation, source_table]
+      properties:
+        id:           { type: string }
+        source:       { type: string }
+        target:       { type: string }
+        relation:     { type: string }
+        label:        { type: string, nullable: true }
+        source_table: { type: string }
+        created_by:   { type: string }
+
+    GraphResponse:
+      type: object
+      required: [nodes, edges, node_count, edge_count]
+      properties:
+        nodes:      { type: array, items: { $ref: '#/components/schemas/GraphNode' } }
+        edges:      { type: array, items: { $ref: '#/components/schemas/GraphEdge' } }
+        node_count: { type: integer }
+        edge_count: { type: integer }
+
+    LinkSuggestion:
+      allOf:
+        - $ref: '#/components/schemas/BaseRecord'
+        - type: object
+          required: [user_id, source_type, source_id, target_type, target_id, relation, confidence, status]
+          properties:
+            user_id:        { type: string, format: uuid }
+            source_type:    { $ref: '#/components/schemas/EntityType' }
+            source_id:      { type: string, format: uuid }
+            target_type:    { $ref: '#/components/schemas/EntityType' }
+            target_id:      { type: string, format: uuid }
+            relation:       { $ref: '#/components/schemas/Relation' }
+            confidence:     { type: number, minimum: 0, maximum: 1 }
+            reason:         { type: string, nullable: true }
+            status:
+              type: string
+              enum: [pending, accepted, dismissed]
+            entity_link_id: { type: string, format: uuid, nullable: true }
+            source_preview: { $ref: '#/components/schemas/EntityPreview' }
+            target_preview: { $ref: '#/components/schemas/EntityPreview' }
+
 paths:
   # ── Auth ────────────────────────────────────────────────────────────────────
   /api/auth/register:
@@ -835,28 +990,163 @@ paths:
         '201': { description: Subscribed }
     delete:
       tags: [Notifications]
-      summary: Unregister a push subscription
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [endpoint]
-              properties:
-                endpoint: { type: string }
-      responses:
-        '200': { description: Unsubscribed }
 
-  /api/notifications/preferences:
-    get:
-      tags: [Notifications]
-      summary: Get notification preferences
+  # ── Entity Links ─────────────────────────────────────────────────────────────
+
+  /api/links:
+    post:
+      tags: [Links]
+      summary: Create an entity link
+      description: |
+        Links two entities owned by the authenticated user. Upserts on duplicate
+        (same source, target, relation). Returns the link plus previews of both entities.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLinkInput'
       responses:
-        '200': { description: OK }
-    put:
-      tags: [Notifications]
-      summary: Update notification preferences
+        '201':
+          description: Created (or upserted)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  link:           { $ref: '#/components/schemas/EntityLink' }
+                  source_preview: { $ref: '#/components/schemas/EntityPreview' }
+                  target_preview: { $ref: '#/components/schemas/EntityPreview' }
+        '400':
+          description: Validation error (self-link, custom without label, invalid type)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Source or target entity not found / not owned by user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+    get:
+      tags: [Links]
+      summary: List links for an entity
+      parameters:
+        - { name: entity_type, in: query, required: true,  schema: { $ref: '#/components/schemas/EntityType' } }
+        - { name: entity_id,   in: query, required: true,  schema: { type: string, format: uuid } }
+        - name: direction
+          in: query
+          schema:
+            type: string
+            enum: [any, in, out]
+            default: any
+        - { name: relation, in: query, schema: { $ref: '#/components/schemas/Relation' } }
+        - { name: depth,    in: query, schema: { type: integer, minimum: 1, maximum: 3, default: 1 } }
+        - { name: limit,    in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  links: { type: array, items: { $ref: '#/components/schemas/UnifiedEdge' } }
+                  total: { type: integer }
+
+  /api/links/graph:
+    get:
+      tags: [Links]
+      summary: Get entity graph (React Flow shape)
+      description: |
+        Returns nodes + edges ready for React Flow. Without `root_type`/`root_id`
+        returns the full user graph (capped at `limit`).
+      parameters:
+        - { name: root_type,    in: query, schema: { $ref: '#/components/schemas/EntityType' } }
+        - { name: root_id,      in: query, schema: { type: string, format: uuid } }
+        - { name: depth,        in: query, schema: { type: integer, minimum: 1, maximum: 3, default: 2 } }
+        - { name: limit,        in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 200 } }
+        - { name: entity_types, in: query, schema: { type: string }, description: "Comma-separated EntityType values" }
+        - { name: relations,    in: query, schema: { type: string }, description: "Comma-separated Relation values" }
+        - { name: ai_only,      in: query, schema: { type: boolean }, description: "Only show links created by AI" }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GraphResponse' }
+
+  /api/links/suggestions:
+    get:
+      tags: [Links]
+      summary: List AI link suggestions
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, accepted, dismissed]
+            default: pending
+        - { name: source_type, in: query, schema: { $ref: '#/components/schemas/EntityType' } }
+        - { name: source_id,   in: query, schema: { type: string, format: uuid } }
+        - { name: limit,       in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  suggestions: { type: array, items: { $ref: '#/components/schemas/LinkSuggestion' } }
+                  total:       { type: integer }
+
+  /api/links/suggestions/{id}/accept:
+    post:
+      tags: [Links]
+      summary: Accept an AI suggestion — promotes to entity_links
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Accepted, entity link created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  link: { $ref: '#/components/schemas/EntityLink' }
+        '409':
+          description: Already accepted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Suggestion not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/links/suggestions/{id}/dismiss:
+    post:
+      tags: [Links]
+      summary: Dismiss an AI suggestion
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Dismissed }
+        '404':
+          description: Suggestion not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/links/{id}:
+    patch:
+      tags: [Links]
+      summary: Update a link (relation / label / metadata)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
         required: true
         content:
@@ -864,17 +1154,50 @@ paths:
             schema:
               type: object
               properties:
-                channels:
-                  type: object
-                  additionalProperties:
-                    type: object
-                    properties:
-                      in_app:   { type: boolean }
-                      push:     { type: boolean }
-                      telegram: { type: boolean }
-                      email:    { type: boolean }
-                quiet_start: { type: string, nullable: true }
-                quiet_end:   { type: string, nullable: true }
+                relation: { $ref: '#/components/schemas/Relation' }
+                label:    { type: string, nullable: true }
+                metadata: { type: object, additionalProperties: true }
       responses:
-        '200': { description: OK }
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EntityLink' }
+        '404':
+          description: Link not found or not owned by user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+    delete:
+      tags: [Links]
+      summary: Delete a link
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Deleted }
+        '404':
+          description: Link not found or not owned by user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/search/graph:
+    get:
+      tags: [Search, Links]
+      summary: Search and return a mini subgraph around matched entities
+      parameters:
+        - { name: q,     in: query, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 30 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/GraphResponse'
+                  - type: object
+                    properties:
+                      query: { type: string }
 

@@ -59,7 +59,7 @@ describe('Items — authenticated', () => {
     const res = await request(server)
       .post('/api/items')
       .set('Authorization', `Bearer ${accessToken}`)
-      .send({ title: 'Test item from vitest', kind: 'task', status: 'inbox' });
+      .send({ title: 'Test item from vitest', kind: 'task', status: 'todo' });
 
     expect(res.status).toBe(201);
     expect(res.body).toMatchObject({ title: 'Test item from vitest' });
