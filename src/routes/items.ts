@@ -130,14 +130,21 @@ itemsRouter.get('/inbox', async (req, res, next) => {
     const { rows } = await req.db.query(
       `SELECT i.*,
               r.name AS role_name, r.color AS role_color,
-              o.title AS objective_title
+              o.title AS objective_title,
+              COALESCE(
+                json_agg(DISTINCT jsonb_build_object('id', tg.id, 'name', tg.name, 'color', tg.color))
+                FILTER (WHERE tg.id IS NOT NULL), '[]'
+              ) AS tags
        FROM   items i
-       LEFT JOIN roles r ON r.id = i.role_id
+       LEFT JOIN roles r      ON r.id = i.role_id
        LEFT JOIN objectives o ON o.id = i.objective_id
+       LEFT JOIN item_tags it ON it.item_id = i.id
+       LEFT JOIN tags tg      ON tg.id = it.tag_id
        WHERE  i.user_id = $1
          AND  i.deleted_at IS NULL
          AND  i.status NOT IN ('done', 'cancelled')
          AND  (i.due_at <= NOW() + INTERVAL '1 day' OR i.due_at IS NULL)
+       GROUP BY i.id, r.name, r.color, o.title
        ORDER BY
          CASE i.priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END,
          i.due_at NULLS LAST, i.created_at`,
@@ -155,14 +162,21 @@ itemsRouter.get('/week', async (req, res, next) => {
     const { rows } = await req.db.query(
       `SELECT i.*,
               r.name AS role_name, r.color AS role_color,
-              o.title AS objective_title
+              o.title AS objective_title,
+              COALESCE(
+                json_agg(DISTINCT jsonb_build_object('id', tg.id, 'name', tg.name, 'color', tg.color))
+                FILTER (WHERE tg.id IS NOT NULL), '[]'
+              ) AS tags
        FROM   items i
-       LEFT JOIN roles r ON r.id = i.role_id
+       LEFT JOIN roles r      ON r.id = i.role_id
        LEFT JOIN objectives o ON o.id = i.objective_id
+       LEFT JOIN item_tags it ON it.item_id = i.id
+       LEFT JOIN tags tg      ON tg.id = it.tag_id
        WHERE  i.user_id = $1
          AND  i.deleted_at IS NULL
          AND  i.status NOT IN ('done', 'cancelled')
          AND  i.due_at BETWEEN NOW() AND NOW() + INTERVAL '7 days'
+       GROUP BY i.id, r.name, r.color, o.title
        ORDER BY i.due_at, CASE i.priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END`,
       [req.user.id],
     );
@@ -179,14 +193,21 @@ itemsRouter.get('/shared', async (req, res, next) => {
       `SELECT i.*,
               u.name AS owner_name, u.avatar_url AS owner_avatar,
               s.permission,
-              r.name AS role_name, r.color AS role_color
+              r.name AS role_name, r.color AS role_color,
+              COALESCE(
+                json_agg(DISTINCT jsonb_build_object('id', tg.id, 'name', tg.name, 'color', tg.color))
+                FILTER (WHERE tg.id IS NOT NULL), '[]'
+              ) AS tags
        FROM   shares s
        JOIN   items i ON i.id = s.entity_id AND i.deleted_at IS NULL
        LEFT JOIN users u ON u.id = i.user_id
        LEFT JOIN roles r ON r.id = i.role_id
+       LEFT JOIN item_tags it ON it.item_id = i.id
+       LEFT JOIN tags tg      ON tg.id = it.tag_id
        WHERE  s.entity_type = 'item'
          AND  s.shared_with_user_id = $1
          AND  s.deleted_at IS NULL
+       GROUP BY i.id, u.name, u.avatar_url, s.permission, r.name, r.color
        ORDER BY i.updated_at DESC`,
       [req.user.id],
     );
