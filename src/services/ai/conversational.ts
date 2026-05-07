@@ -126,19 +126,9 @@ export async function runIncoming(
   const projects = await listActiveProjects(db);
   const linked   = await classifyProjectLinks(extracted, projects);
 
-  // 4. For "new" idea-style proposals, organize them now so the preview can
-  //    reflect the auto-generated plan.
-  for (const p of linked) {
-    if (p.kind === 'idea' && p.project_link.mode === 'new' && isGroqAvailable()) {
-      try {
-        p.structured = await organizeIdea({ title: p.title, description: p.description });
-      } catch (err) {
-        logger.warn({ err, title: p.title }, 'organizeIdea (preview) failed');
-      }
-    }
-  }
-
-  // 5. Persist session.
+  // 4. Persist session — do NOT organizeIdea here.
+  // Generating a full plan before the user confirms wastes 2-5s per proposal.
+  // organizeIdea is called at commit time (see commit()) in parallel.
   const session = await openSession(db, surface, chatId, {
     proposals:       linked,
     ...(typeof opts.updateId === 'number' ? { last_update_id: opts.updateId } : {}),
@@ -239,6 +229,22 @@ async function commit(db: ScopedDb, session: SessionRow): Promise<RunResult> {
   if (!live.length) {
     await closeSession(db, session.id);
     return { reply: 'Nothing left to save.', session_id: session.id, done: true };
+  }
+
+  // For any new-idea proposals that don't yet have a structured plan, generate
+  // them now (in parallel) — right before saving, so the plan lands with the idea.
+  if (isGroqAvailable()) {
+    await Promise.all(
+      live.map(async (p) => {
+        if (p.kind === 'idea' && p.project_link.mode === 'new' && !p.structured) {
+          try {
+            p.structured = await organizeIdea({ title: p.title, description: p.description });
+          } catch (err) {
+            logger.warn({ err, title: p.title }, 'organizeIdea (commit) failed — saving without plan');
+          }
+        }
+      }),
+    );
   }
 
   const results = await dispatchProposals(db, live as ExtractedItem[]);

@@ -105,6 +105,10 @@ async function handleMessage(msg: TelegramBot.Message, updateId?: number): Promi
 
   const user = rows[0]!;
 
+  // Send typing action immediately so the user gets instant visual feedback
+  // while the AI pipeline runs (extract → classify → reply can take 3-8 seconds).
+  void bot.sendChatAction(chatId, 'typing').catch(() => {/* non-critical */});
+
   // ── Command dispatch ───────────────────────────────────────────────────────
   if (text === '/help') {
     await sendHelp(chatId);
