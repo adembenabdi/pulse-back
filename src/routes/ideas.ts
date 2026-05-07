@@ -23,30 +23,42 @@ import { requireAuth } from '../middleware/auth.js';
 import { AppError } from '../middleware/error.js';
 import { organizeIdea } from '../services/ai/idea-organize.js';
 import { isGroqAvailable } from '../services/ai/groq.js';
+import {
+  loadIdea, ensureProject, saveStructured, materializeMissingTasks,
+  createItemForTask, updateItemForTask, softDeleteItem, newId,
+  type OrganizedStructured, type StructuredTask,
+  type StructuredFeature, type StructuredMaterial,
+} from '../lib/ideas.js';
 
 export const ideasRouter: Router = Router();
 ideasRouter.use(requireAuth);
 
 // ── Schemas ───────────────────────────────────────────────────────────────────
 const structuredTaskSchema = z.object({
+  id:         z.string().uuid().optional(),
+  item_id:    z.string().uuid().nullable().optional(),
   title:      z.string().min(1),
   effort_min: z.number().int().min(1).max(1440).optional(),
   priority:   z.enum(['low', 'medium', 'high']).optional(),
   done:       z.boolean().optional(),
 });
+const structuredMaterialSchema = z.object({
+  id:       z.string().uuid().optional(),
+  name:     z.string().min(1),
+  category: z.enum(['tool', 'service', 'hardware', 'knowledge', 'other']).optional(),
+  note:     z.string().optional(),
+});
+const structuredFeatureSchema = z.object({
+  id:          z.string().uuid().optional(),
+  title:       z.string().min(1),
+  description: z.string().optional(),
+});
 const structuredSchema = z.object({
   summary:         z.string().optional(),
   target_audience: z.string().optional(),
   tasks:           z.array(structuredTaskSchema).optional(),
-  materials:       z.array(z.object({
-    name: z.string().min(1),
-    category: z.enum(['tool', 'service', 'hardware', 'knowledge', 'other']).optional(),
-    note: z.string().optional(),
-  })).optional(),
-  extra_features:  z.array(z.object({
-    title: z.string().min(1),
-    description: z.string().optional(),
-  })).optional(),
+  materials:       z.array(structuredMaterialSchema).optional(),
+  extra_features:  z.array(structuredFeatureSchema).optional(),
   risks:           z.array(z.string()).optional(),
   next_step:       z.string().optional(),
   generated_at:    z.string().optional(),
@@ -97,9 +109,16 @@ ideasRouter.get('/', async (req, res, next) => {
 });
 
 // ── POST / ────────────────────────────────────────────────────────────────────
+// Every idea is auto-promoted to a `objectives` row of kind='project' so the
+// user can treat them uniformly. If the idea ships with structured.tasks,
+// they are materialized into items linked to the new project right away.
 ideasRouter.post('/', async (req, res, next) => {
   try {
     const body = createSchema.parse(req.body);
+    const structured: OrganizedStructured | undefined = body.structured
+      ? { ...body.structured, tasks: body.structured.tasks?.map((t) => ({ ...t, id: t.id ?? newId() })) }
+      : undefined;
+
     const { rows } = await req.db.query(
       `INSERT INTO ideas (user_id, title, description, raw_description, role_id, validation_status, structured)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -111,10 +130,23 @@ ideasRouter.post('/', async (req, res, next) => {
         body.raw_description ?? null,
         body.role_id ?? null,
         body.validation_status,
-        body.structured ? JSON.stringify(body.structured) : null,
+        structured ? JSON.stringify(structured) : null,
       ],
     );
-    res.status(201).json(rows[0]);
+    const ideaRow = rows[0]!;
+
+    // Auto-promote
+    const idea = await loadIdea(req.db, ideaRow.id);
+    if (idea) {
+      const projectId = await ensureProject(req.db, idea);
+      if (idea.structured && Array.isArray(idea.structured.tasks)) {
+        await materializeMissingTasks(req.db, projectId, idea.role_id, idea.structured);
+        await saveStructured(req.db, idea.id, idea.structured);
+      }
+      ideaRow.converted_to_id = projectId;
+      ideaRow.structured = idea.structured;
+    }
+    res.status(201).json(ideaRow);
   } catch (err) {
     next(err);
   }
@@ -357,10 +389,23 @@ ideasRouter.post('/:id/organize', async (req, res, next) => {
     );
     if (!idea) throw new AppError(404, 'Idea not found');
 
-    const structured = await organizeIdea({
+    const generated = await organizeIdea({
       title:       idea.title,
       description: idea.raw_description || idea.description,
     });
+    // Assign stable ids to structured collections so the granular endpoints
+    // can address them individually.
+    const structured: OrganizedStructured = {
+      ...generated,
+      tasks:          generated.tasks?.map((t)         => ({ ...t, id: newId() })),
+      extra_features: generated.extra_features?.map((f) => ({ ...f, id: newId() })),
+      materials:      generated.materials?.map((m)     => ({ ...m, id: newId() })),
+    };
+
+    const fresh = await loadIdea(req.db, idea.id);
+    if (!fresh) throw new AppError(404, 'Idea not found');
+    const projectId = await ensureProject(req.db, fresh);
+    await materializeMissingTasks(req.db, projectId, fresh.role_id, structured);
 
     const { rows } = await req.db.query(
       `UPDATE ideas
@@ -474,4 +519,232 @@ ideasRouter.delete('/:id/resources/:rid', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Granular structured-field endpoints
+//
+// All of these load the idea, mutate the `structured` jsonb in-memory, and
+// save it back. Tasks also sync to the paired project's `items` rows.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function loadOrFail(req: { db: import('../lib/db.js').ScopedDb }, ideaId: string) {
+  const idea = await loadIdea(req.db, ideaId);
+  if (!idea) throw new AppError(404, 'Idea not found');
+  return idea;
+}
+
+function ensureStructured(idea: { structured: OrganizedStructured | null }): OrganizedStructured {
+  return idea.structured ?? (idea.structured = {});
+}
+
+// ── tasks ────────────────────────────────────────────────────────────────────
+ideasRouter.post('/:id/tasks', async (req, res, next) => {
+  try {
+    const body = structuredTaskSchema.parse(req.body);
+    const idea = await loadOrFail(req, req.params['id']!);
+    const projectId = await ensureProject(req.db, idea);
+    const structured = ensureStructured(idea);
+    structured.tasks ??= [];
+    const task: StructuredTask = { ...body, id: body.id ?? newId() };
+    task.item_id = await createItemForTask(req.db, projectId, idea.role_id, task);
+    structured.tasks.push(task);
+    await saveStructured(req.db, idea.id, structured);
+    res.status(201).json(task);
+  } catch (err) { next(err); }
+});
+
+ideasRouter.patch('/:id/tasks/:taskId', async (req, res, next) => {
+  try {
+    const body = structuredTaskSchema.partial().parse(req.body);
+    const idea = await loadOrFail(req, req.params['id']!);
+    const structured = ensureStructured(idea);
+    const tasks = structured.tasks ?? [];
+    const task = tasks.find((t) => t.id === req.params['taskId']);
+    if (!task) throw new AppError(404, 'Task not found');
+    Object.assign(task, body, { id: task.id });
+    if (task.item_id) {
+      await updateItemForTask(req.db, task.item_id, body);
+    } else if (idea.converted_to_id) {
+      task.item_id = await createItemForTask(req.db, idea.converted_to_id, idea.role_id, task);
+    }
+    await saveStructured(req.db, idea.id, structured);
+    res.json(task);
+  } catch (err) { next(err); }
+});
+
+ideasRouter.delete('/:id/tasks/:taskId', async (req, res, next) => {
+  try {
+    const idea = await loadOrFail(req, req.params['id']!);
+    const structured = ensureStructured(idea);
+    const tasks = structured.tasks ?? [];
+    const idx = tasks.findIndex((t) => t.id === req.params['taskId']);
+    if (idx < 0) throw new AppError(404, 'Task not found');
+    const [task] = tasks.splice(idx, 1);
+    if (task?.item_id) await softDeleteItem(req.db, task.item_id);
+    await saveStructured(req.db, idea.id, structured);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ── features ────────────────────────────────────────────────────────────────
+ideasRouter.post('/:id/features', async (req, res, next) => {
+  try {
+    const body = structuredFeatureSchema.parse(req.body);
+    const idea = await loadOrFail(req, req.params['id']!);
+    const structured = ensureStructured(idea);
+    structured.extra_features ??= [];
+    const feature: StructuredFeature = { ...body, id: body.id ?? newId() };
+    structured.extra_features.push(feature);
+    await saveStructured(req.db, idea.id, structured);
+    res.status(201).json(feature);
+  } catch (err) { next(err); }
+});
+
+ideasRouter.patch('/:id/features/:featureId', async (req, res, next) => {
+  try {
+    const body = structuredFeatureSchema.partial().parse(req.body);
+    const idea = await loadOrFail(req, req.params['id']!);
+    const structured = ensureStructured(idea);
+    const features = structured.extra_features ?? [];
+    const f = features.find((x) => x.id === req.params['featureId']);
+    if (!f) throw new AppError(404, 'Feature not found');
+    Object.assign(f, body, { id: f.id });
+    await saveStructured(req.db, idea.id, structured);
+    res.json(f);
+  } catch (err) { next(err); }
+});
+
+ideasRouter.delete('/:id/features/:featureId', async (req, res, next) => {
+  try {
+    const idea = await loadOrFail(req, req.params['id']!);
+    const structured = ensureStructured(idea);
+    const features = structured.extra_features ?? [];
+    const idx = features.findIndex((f) => f.id === req.params['featureId']);
+    if (idx < 0) throw new AppError(404, 'Feature not found');
+    features.splice(idx, 1);
+    await saveStructured(req.db, idea.id, structured);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ── materials ───────────────────────────────────────────────────────────────
+ideasRouter.post('/:id/materials', async (req, res, next) => {
+  try {
+    const body = structuredMaterialSchema.parse(req.body);
+    const idea = await loadOrFail(req, req.params['id']!);
+    const structured = ensureStructured(idea);
+    structured.materials ??= [];
+    const material: StructuredMaterial = { ...body, id: body.id ?? newId() };
+    structured.materials.push(material);
+    await saveStructured(req.db, idea.id, structured);
+    res.status(201).json(material);
+  } catch (err) { next(err); }
+});
+
+ideasRouter.patch('/:id/materials/:matId', async (req, res, next) => {
+  try {
+    const body = structuredMaterialSchema.partial().parse(req.body);
+    const idea = await loadOrFail(req, req.params['id']!);
+    const structured = ensureStructured(idea);
+    const mats = structured.materials ?? [];
+    const m = mats.find((x) => x.id === req.params['matId']);
+    if (!m) throw new AppError(404, 'Material not found');
+    Object.assign(m, body, { id: m.id });
+    await saveStructured(req.db, idea.id, structured);
+    res.json(m);
+  } catch (err) { next(err); }
+});
+
+ideasRouter.delete('/:id/materials/:matId', async (req, res, next) => {
+  try {
+    const idea = await loadOrFail(req, req.params['id']!);
+    const structured = ensureStructured(idea);
+    const mats = structured.materials ?? [];
+    const idx = mats.findIndex((m) => m.id === req.params['matId']);
+    if (idx < 0) throw new AppError(404, 'Material not found');
+    mats.splice(idx, 1);
+    await saveStructured(req.db, idea.id, structured);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ── risks (string array, indexed by position) ───────────────────────────────
+ideasRouter.post('/:id/risks', async (req, res, next) => {
+  try {
+    const { text } = z.object({ text: z.string().min(1).max(500) }).parse(req.body);
+    const idea = await loadOrFail(req, req.params['id']!);
+    const structured = ensureStructured(idea);
+    structured.risks ??= [];
+    structured.risks.push(text);
+    await saveStructured(req.db, idea.id, structured);
+    res.status(201).json({ index: structured.risks.length - 1, text });
+  } catch (err) { next(err); }
+});
+
+ideasRouter.patch('/:id/risks/:idx', async (req, res, next) => {
+  try {
+    const { text } = z.object({ text: z.string().min(1).max(500) }).parse(req.body);
+    const idea = await loadOrFail(req, req.params['id']!);
+    const structured = ensureStructured(idea);
+    const risks = structured.risks ?? [];
+    const i = Number(req.params['idx']);
+    if (!Number.isInteger(i) || i < 0 || i >= risks.length) throw new AppError(404, 'Risk not found');
+    risks[i] = text;
+    await saveStructured(req.db, idea.id, structured);
+    res.json({ index: i, text });
+  } catch (err) { next(err); }
+});
+
+ideasRouter.delete('/:id/risks/:idx', async (req, res, next) => {
+  try {
+    const idea = await loadOrFail(req, req.params['id']!);
+    const structured = ensureStructured(idea);
+    const risks = structured.risks ?? [];
+    const i = Number(req.params['idx']);
+    if (!Number.isInteger(i) || i < 0 || i >= risks.length) throw new AppError(404, 'Risk not found');
+    risks.splice(i, 1);
+    await saveStructured(req.db, idea.id, structured);
+    res.json({ ok: true });
+  } catch (err) { next(err); }
+});
+
+// ── title / description shortcuts ───────────────────────────────────────────
+ideasRouter.patch('/:id/title', async (req, res, next) => {
+  try {
+    const { title } = z.object({ title: z.string().min(1).max(500) }).parse(req.body);
+    const { rowCount } = await req.db.query(
+      `UPDATE ideas SET title = $1, updated_at = NOW()
+       WHERE id = $2 AND user_id = $3 AND deleted_at IS NULL`,
+      [title, req.params['id'], req.user.id],
+    );
+    if (!rowCount) throw new AppError(404, 'Idea not found');
+    // Mirror to project objective.
+    await req.db.query(
+      `UPDATE objectives SET title = $1, updated_at = NOW()
+       WHERE id = (SELECT converted_to_id FROM ideas WHERE id = $2)
+         AND user_id = $3 AND deleted_at IS NULL`,
+      [title, req.params['id'], req.user.id],
+    );
+    res.json({ ok: true, title });
+  } catch (err) { next(err); }
+});
+
+ideasRouter.patch('/:id/description', async (req, res, next) => {
+  try {
+    const { description } = z.object({ description: z.string().max(5000) }).parse(req.body);
+    const { rowCount } = await req.db.query(
+      `UPDATE ideas SET description = $1, updated_at = NOW()
+       WHERE id = $2 AND user_id = $3 AND deleted_at IS NULL`,
+      [description, req.params['id'], req.user.id],
+    );
+    if (!rowCount) throw new AppError(404, 'Idea not found');
+    await req.db.query(
+      `UPDATE objectives SET description = $1, updated_at = NOW()
+       WHERE id = (SELECT converted_to_id FROM ideas WHERE id = $2)
+         AND user_id = $3 AND deleted_at IS NULL`,
+      [description, req.params['id'], req.user.id],
+    );
+    res.json({ ok: true, description });
+  } catch (err) { next(err); }
 });

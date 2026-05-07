@@ -29,6 +29,7 @@ import { AppError }            from '../middleware/error.js';
 import { assistantChat }       from '../services/ai/chat.js';
 import { extractItems, type ExtractedItem } from '../services/ai/extract.js';
 import { dispatchProposals }   from '../services/ai/dispatch.js';
+import { runIncoming, applyChoice } from '../services/ai/conversational.js';
 import { generateMorningBriefing } from '../services/ai/briefings.js';
 import { isGroqAvailable }     from '../services/ai/groq.js';
 import { handleWebhook }       from '../services/messaging/telegram.js';
@@ -106,6 +107,20 @@ assistantRouter.post('/conversations', async (req, res, next) => {
     if (!isGroqAvailable()) throw new AppError(503, 'AI service not configured');
     const { message } = chatSchema.parse(req.body);
 
+    // Try the conversational engine first — it handles capture/confirm flows.
+    const sdb = scoped(req.user.id);
+    const conv = await runIncoming(sdb, 'web', null, message, { timezone: req.user.timezone });
+    if (conv.reply && !conv.fallback) {
+      res.status(201).json({
+        reply:           conv.reply,
+        session_id:      conv.session_id,
+        done:            conv.done,
+        results:         conv.results,
+        conversationId:  null,
+      });
+      return;
+    }
+
     const result = await assistantChat({
       userId:         req.user.id,
       conversationId: null,
@@ -131,6 +146,20 @@ assistantRouter.post('/conversations/:id/messages', async (req, res, next) => {
 
     const { message } = chatSchema.parse(req.body);
 
+    // Conversational engine first (sessions keyed by conversation id).
+    const sdb = scoped(req.user.id);
+    const cv = await runIncoming(sdb, 'web', req.params['id']!, message, { timezone: req.user.timezone });
+    if (cv.reply && !cv.fallback) {
+      res.json({
+        reply:           cv.reply,
+        session_id:      cv.session_id,
+        done:            cv.done,
+        results:         cv.results,
+        conversationId:  req.params['id'],
+      });
+      return;
+    }
+
     const result = await assistantChat({
       userId:         req.user.id,
       conversationId: req.params['id'],
@@ -139,6 +168,51 @@ assistantRouter.post('/conversations/:id/messages', async (req, res, next) => {
     });
 
     res.json(result);
+  } catch (err) { next(err); }
+});
+
+// ── Conversational sessions (preview / confirm batches) ────────────────────────
+assistantRouter.get('/sessions/current', async (req, res, next) => {
+  try {
+    const chatId = (req.query['chatId'] as string | undefined) ?? null;
+    const { rows } = await req.db.query(
+      `SELECT id, surface, chat_id, awaiting, pending, expires_at
+       FROM assistant_sessions
+       WHERE user_id = $1 AND surface = 'web'
+         AND COALESCE(chat_id, '') = COALESCE($2, '')
+         AND expires_at > NOW()`,
+      [req.user.id, chatId],
+    );
+    res.json(rows[0] ?? null);
+  } catch (err) { next(err); }
+});
+
+assistantRouter.post('/sessions/:id/apply', async (req, res, next) => {
+  try {
+    const { text } = z.object({ text: z.string().min(1).max(500) }).parse(req.body);
+    const { rows } = await req.db.query(
+      `SELECT id, user_id, surface, chat_id, awaiting, pending, expires_at
+       FROM assistant_sessions
+       WHERE id = $1 AND user_id = $2 AND expires_at > NOW()`,
+      [req.params['id'], req.user.id],
+    );
+    const session = rows[0];
+    if (!session) throw new AppError(404, 'Session not found or expired');
+
+    const sdb = scoped(req.user.id);
+    const result = await applyChoice(sdb, session as Parameters<typeof applyChoice>[1], text);
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+assistantRouter.delete('/sessions/:id', async (req, res, next) => {
+  try {
+    const { rowCount } = await req.db.query(
+      `DELETE FROM assistant_sessions WHERE id = $1 AND user_id = $2`,
+      [req.params['id'], req.user.id],
+    );
+    if (!rowCount) throw new AppError(404, 'Session not found');
+    res.json({ ok: true });
   } catch (err) { next(err); }
 });
 

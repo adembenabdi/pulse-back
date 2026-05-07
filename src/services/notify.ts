@@ -137,7 +137,7 @@ async function dispatchTelegram(
   payload: { title: string; body?: string },
 ): Promise<void> {
   try {
-    const { sendTelegramMessage } = await import('./telegram.js').catch(() => ({ sendTelegramMessage: null }));
+    const { sendTelegramMessage } = await import('./messaging/telegram.js').catch(() => ({ sendTelegramMessage: null }));
     if (sendTelegramMessage) {
       const text = payload.body ? `*${payload.title}*\n${payload.body}` : payload.title;
       await sendTelegramMessage(chatId, text);

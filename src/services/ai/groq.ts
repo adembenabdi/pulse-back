@@ -48,7 +48,7 @@ export async function groqChat(
 ): Promise<GroqResult> {
   const client = getGroqClient();
 
-  try {
+  const send = async (): Promise<GroqResult> => {
     const completion = await client.chat.completions.create({
       model:       opts.model ?? DEFAULT_MODEL,
       messages,
@@ -66,8 +66,19 @@ export async function groqChat(
       prompt_tokens:     completion.usage?.prompt_tokens     ?? 0,
       completion_tokens: completion.usage?.completion_tokens ?? 0,
     };
+  };
+
+  try {
+    return await send();
   } catch (err) {
-    logger.error(err, 'groqChat error');
-    throw err;
+    // One retry with a small backoff for transient failures (network, 5xx, rate-limit blips).
+    logger.warn(err, 'groqChat first attempt failed — retrying once');
+    await new Promise((r) => setTimeout(r, 1500));
+    try {
+      return await send();
+    } catch (err2) {
+      logger.error(err2, 'groqChat retry failed');
+      throw err2;
+    }
   }
 }

@@ -19,8 +19,7 @@
 
 import TelegramBot             from 'node-telegram-bot-api';
 import { assistantChat }       from '../ai/chat.js';
-import { extractItems }        from '../ai/extract.js';
-import { dispatchProposals }   from '../ai/dispatch.js';
+import { runIncoming }         from '../ai/conversational.js';
 import { generateMorningBriefing, generateEveningRecap } from '../ai/briefings.js';
 import { extractResourceFromUrl, findUrl } from '../ai/resource-extract.js';
 import { db, scoped }          from '../../lib/db.js';
@@ -57,7 +56,7 @@ export function initTelegramBot(): void {
   } else {
     // Development: long-polling
     bot = new TelegramBot(token, { polling: true });
-    bot.on('message', handleMessage);
+    bot.on('message', (msg) => { void handleMessage(msg); });
     logger.info('Telegram bot initialized in polling mode');
   }
 }
@@ -68,12 +67,12 @@ export async function handleWebhook(body: TelegramBot.Update): Promise<void> {
   if (!bot) return;
   const msg = body.message;
   if (!msg) return;
-  await handleMessage(msg);
+  await handleMessage(msg, body.update_id);
 }
 
-// ── Core message handler ──────────────────────────────────────────────────────
+// ── Core message handler ─────────────────────────────────────────────────────
 
-async function handleMessage(msg: TelegramBot.Message): Promise<void> {
+async function handleMessage(msg: TelegramBot.Message, updateId?: number): Promise<void> {
   if (!bot || !msg.text || !msg.chat.id) return;
 
   const chatId = String(msg.chat.id);
@@ -146,7 +145,7 @@ async function handleMessage(msg: TelegramBot.Message): Promise<void> {
     return;
   }
 
-  // ── URL shared → save as resource (meta tags always, AI-enriched if available) ──
+  // ── URL shared → save as resource (fast path, no confirm) ─────────────────────
   const sharedUrl = findUrl(text);
   if (sharedUrl) {
     try {
@@ -170,46 +169,33 @@ async function handleMessage(msg: TelegramBot.Message): Promise<void> {
       return;
     } catch (err) {
       logger.warn({ err, sharedUrl }, 'Telegram URL extract failed — falling back');
-      // fall through to extractItems
+      // fall through to the conversational engine
     }
   }
 
-  // ── Free-form NLU — try extractItems + dispatch first, fall back to assistantChat ─
+  // ── Conversational engine (free-text, multi-turn confirm) ──────────────────
   try {
-    const extracted = await extractItems(text, { timezone: user.timezone });
+    const sdb = scoped(user.id);
+    const result = await runIncoming(sdb, 'telegram', chatId, text, {
+      timezone: user.timezone,
+      ...(typeof updateId === 'number' ? { updateId } : {}),
+    });
 
-    if (extracted.length > 0) {
-      const sdb = scoped(user.id);
-      const results = await dispatchProposals(sdb, extracted);
-      const created = results.filter(r => r.ok);
-
-      if (created.length > 0) {
-        const icons: Record<string, string> = {
-          task: '✅', note: '📝', idea: '💡',
-          event: '📅', meeting: '👥', reminder: '⏰',
-          resource: '🔗', habit_log: '🔁',
-        };
-        const lines = results.map(r => r.ok
-          ? `${icons[r.kind] ?? '•'} ${capitalize(r.kind)}: "${r.title}"`
-          : `⚠️ ${capitalize(r.kind)} skipped: ${r.error}`,
-        );
-        await bot.sendMessage(
-          chatId,
-          `Captured ${created.length} item${created.length === 1 ? '' : 's'}:\n${lines.join('\n')}`,
-        );
-        return;
-      }
+    if (result.reply) {
+      await bot.sendMessage(chatId, result.reply, { parse_mode: 'Markdown' });
+      return;
     }
 
-    // Nothing actionable — chat back as a normal AI conversation
-    const result = await assistantChat({
-      userId:         user.id,
-      conversationId: null,
-      userMessage:    text,
-      timezone:       user.timezone,
-    });
-    await bot.sendMessage(chatId, result.reply, { parse_mode: 'Markdown' });
-
+    if (result.fallback) {
+      // Engine had nothing to extract — use the free-form chat agent.
+      const reply = await assistantChat({
+        userId:         user.id,
+        conversationId: null,
+        userMessage:    text,
+        timezone:       user.timezone,
+      });
+      await bot.sendMessage(chatId, reply.reply, { parse_mode: 'Markdown' });
+    }
   } catch (err) {
     logger.error(err, 'Telegram message handler error');
     await bot.sendMessage(chatId, '⚠️ Something went wrong. Please try again.');
