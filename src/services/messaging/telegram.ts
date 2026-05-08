@@ -78,107 +78,113 @@ async function handleMessage(msg: TelegramBot.Message, updateId?: number): Promi
   const chatId = String(msg.chat.id);
   const text   = msg.text.trim();
 
-  // Resolve user from telegram_chat_id
-  const { rows } = await db.admin.query<{ id: string; name: string; timezone: string }>(
-    `SELECT id, name, COALESCE(preferences->>'timezone', 'UTC') AS timezone
-     FROM users
-     WHERE telegram_chat_id = $1 AND deleted_at IS NULL`,
-    [chatId],
-  );
-
-  // /start — provide link-code even for unlinked users
-  if (text === '/start' || text.startsWith('/start ')) {
-    await handleStart(chatId, rows[0] ?? null);
+  // /ping — alive check with zero DB involvement (useful for diagnosing issues)
+  if (text === '/ping') {
+    await bot.sendMessage(chatId, '🟢 pong');
     return;
   }
 
-  // /link <email> — link this chat to an existing Pulse account
-  if (text.startsWith('/link ')) {
-    await handleLink(chatId, text.slice(6).trim().toLowerCase(), msg.from?.username ?? null);
-    return;
-  }
-
-  if (!rows.length) {
-    await bot.sendMessage(chatId, '❓ Your account is not linked yet.\n\nUse: /link your@email.com');
-    return;
-  }
-
-  const user = rows[0]!;
-
-  // Send typing action immediately so the user gets instant visual feedback
-  // while the AI pipeline runs (extract → classify → reply can take 3-8 seconds).
-  void bot.sendChatAction(chatId, 'typing').catch(() => {/* non-critical */});
-
-  // ── Command dispatch ───────────────────────────────────────────────────────
-  if (text === '/help') {
-    await sendHelp(chatId);
-    return;
-  }
-
-  if (text === '/today' || text === '/morning') {
-    const briefing = await generateMorningBriefing(user.id);
-    await bot.sendMessage(chatId, briefing, { parse_mode: 'Markdown' });
-    return;
-  }
-
-  if (text === '/recap' || text === '/evening') {
-    const recap = await generateEveningRecap(user.id);
-    await bot.sendMessage(chatId, recap, { parse_mode: 'Markdown' });
-    return;
-  }
-
-  if (text.startsWith('/task ')) {
-    const title = text.slice(6).trim();
-    if (!title) { await bot.sendMessage(chatId, 'Usage: /task <description>'); return; }
-    await db.admin.query(
-      `INSERT INTO items (user_id, kind, title, status, priority) VALUES ($1, 'task', $2, 'todo', 'medium')`,
-      [user.id, title],
-    );
-    await bot.sendMessage(chatId, `✅ Task saved: "${title}"`);
-    return;
-  }
-
-  if (text.startsWith('/idea ')) {
-    const title = text.slice(6).trim();
-    if (!title) { await bot.sendMessage(chatId, 'Usage: /idea <description>'); return; }
-    await db.admin.query(
-      `INSERT INTO ideas (user_id, title) VALUES ($1, $2)`,
-      [user.id, title],
-    );
-    await bot.sendMessage(chatId, `💡 Idea saved: "${title}"`);
-    return;
-  }
-
-  // ── URL shared → save as resource (fast path, no confirm) ─────────────────────
-  const sharedUrl = findUrl(text);
-  if (sharedUrl) {
-    try {
-      await bot.sendChatAction(chatId, 'typing');
-      const r = await extractResourceFromUrl(sharedUrl);
-      const finalUrl   = r.url || sharedUrl;
-      const finalTitle = r.title || sharedUrl;
-      await db.admin.query(
-        `INSERT INTO resources (user_id, url, title, description, tags)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [user.id, finalUrl, finalTitle, r.description || null,
-         r.tags.length ? JSON.stringify(r.tags) : null],
-      );
-      const tagsLine = r.tags.length ? `\n🏷  ${r.tags.join(', ')}` : '';
-      const descLine = r.description ? `\n${r.description}` : '';
-      await bot.sendMessage(
-        chatId,
-        `🔗 *Saved to Resources*\n\n*${finalTitle}*${descLine}${tagsLine}`,
-        { parse_mode: 'Markdown', disable_web_page_preview: true },
-      );
-      return;
-    } catch (err) {
-      logger.warn({ err, sharedUrl }, 'Telegram URL extract failed — falling back');
-      // fall through to the conversational engine
-    }
-  }
-
-  // ── Conversational engine (free-text, multi-turn confirm) ──────────────────
   try {
+    // Resolve user from telegram_chat_id
+    const { rows } = await db.admin.query<{ id: string; name: string; timezone: string }>(
+      `SELECT id, name, COALESCE(preferences->>'timezone', 'UTC') AS timezone
+       FROM users
+       WHERE telegram_chat_id = $1 AND deleted_at IS NULL`,
+      [chatId],
+    );
+
+    // /start — provide link-code even for unlinked users
+    if (text === '/start' || text.startsWith('/start ')) {
+      await handleStart(chatId, rows[0] ?? null);
+      return;
+    }
+
+    // /link <email> — link this chat to an existing Pulse account
+    if (text.startsWith('/link ')) {
+      await handleLink(chatId, text.slice(6).trim().toLowerCase(), msg.from?.username ?? null);
+      return;
+    }
+
+    if (!rows.length) {
+      await bot.sendMessage(chatId, '❓ Your account is not linked yet.\n\nUse: /link your@email.com');
+      return;
+    }
+
+    const user = rows[0]!;
+
+    // Send typing action immediately so the user gets instant visual feedback
+    // while the AI pipeline runs (extract → classify → reply can take 3-8 seconds).
+    void bot.sendChatAction(chatId, 'typing').catch(() => {/* non-critical */});
+
+    // ── Command dispatch ─────────────────────────────────────────────────────
+    if (text === '/help') {
+      await sendHelp(chatId);
+      return;
+    }
+
+    if (text === '/today' || text === '/morning') {
+      const briefing = await generateMorningBriefing(user.id);
+      await bot.sendMessage(chatId, briefing, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    if (text === '/recap' || text === '/evening') {
+      const recap = await generateEveningRecap(user.id);
+      await bot.sendMessage(chatId, recap, { parse_mode: 'Markdown' });
+      return;
+    }
+
+    if (text.startsWith('/task ')) {
+      const title = text.slice(6).trim();
+      if (!title) { await bot.sendMessage(chatId, 'Usage: /task <description>'); return; }
+      await db.admin.query(
+        `INSERT INTO items (user_id, kind, title, status, priority) VALUES ($1, 'task', $2, 'todo', 'medium')`,
+        [user.id, title],
+      );
+      await bot.sendMessage(chatId, `✅ Task saved: "${title}"`);
+      return;
+    }
+
+    if (text.startsWith('/idea ')) {
+      const title = text.slice(6).trim();
+      if (!title) { await bot.sendMessage(chatId, 'Usage: /idea <description>'); return; }
+      await db.admin.query(
+        `INSERT INTO ideas (user_id, title) VALUES ($1, $2)`,
+        [user.id, title],
+      );
+      await bot.sendMessage(chatId, `💡 Idea saved: "${title}"`);
+      return;
+    }
+
+    // ── URL shared → save as resource (fast path, no confirm) ───────────────
+    const sharedUrl = findUrl(text);
+    if (sharedUrl) {
+      try {
+        await bot.sendChatAction(chatId, 'typing');
+        const r = await extractResourceFromUrl(sharedUrl);
+        const finalUrl   = r.url || sharedUrl;
+        const finalTitle = r.title || sharedUrl;
+        await db.admin.query(
+          `INSERT INTO resources (user_id, url, title, description, tags)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [user.id, finalUrl, finalTitle, r.description || null,
+           r.tags.length ? JSON.stringify(r.tags) : null],
+        );
+        const tagsLine = r.tags.length ? `\n🏷  ${r.tags.join(', ')}` : '';
+        const descLine = r.description ? `\n${r.description}` : '';
+        await bot.sendMessage(
+          chatId,
+          `🔗 *Saved to Resources*\n\n*${finalTitle}*${descLine}${tagsLine}`,
+          { parse_mode: 'Markdown', disable_web_page_preview: true },
+        );
+        return;
+      } catch (err) {
+        logger.warn({ err, sharedUrl }, 'Telegram URL extract failed — falling back');
+        // fall through to the conversational engine
+      }
+    }
+
+    // ── Conversational engine (free-text, multi-turn confirm) ────────────────
     const sdb = scoped(user.id);
     const result = await runIncoming(sdb, 'telegram', chatId, text, {
       timezone: user.timezone,
@@ -202,7 +208,12 @@ async function handleMessage(msg: TelegramBot.Message, updateId?: number): Promi
     }
   } catch (err) {
     logger.error(err, 'Telegram message handler error');
-    await bot.sendMessage(chatId, '⚠️ Something went wrong. Please try again.');
+    // Always reply so the user knows something went wrong instead of seeing silence.
+    try {
+      await bot.sendMessage(chatId, '⚠️ Something went wrong. Please try again or type /ping to check the connection.');
+    } catch (sendErr) {
+      logger.error(sendErr, 'Failed to send error message to Telegram');
+    }
   }
 }
 
