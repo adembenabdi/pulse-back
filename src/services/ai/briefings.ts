@@ -14,37 +14,37 @@ import { logger }    from '../../lib/logger.js';
 
 // ── Data loaders ──────────────────────────────────────────────────────────────
 
-interface TaskRow    { title: string; due_date: string | null }
-interface EventRow   { title: string; start_at: string }
-interface HabitRow   { name: string; streak_current: number }
+interface TaskRow    { title: string; due_at: string | null }
+interface EventRow   { title: string; starts_at: string }
+interface HabitRow   { title: string }
 interface SummaryRow { completed: number; pending: number; habit_completions: number }
 
 async function loadTodayData(userId: string) {
   const today = new Date().toISOString().slice(0, 10);
 
   const { rows: tasks } = await db.admin.query<TaskRow>(
-    `SELECT title, due_date::TEXT FROM items
+    `SELECT title, due_at::TEXT FROM items
      WHERE user_id = $1 AND deleted_at IS NULL
        AND status   != 'done'
-       AND (due_date IS NULL OR due_date <= $2)
-     ORDER BY due_date NULLS LAST, created_at
+       AND (due_at IS NULL OR due_at::DATE <= $2)
+     ORDER BY due_at NULLS LAST, created_at
      LIMIT 10`,
     [userId, today],
   );
 
   const { rows: events } = await db.admin.query<EventRow>(
-    `SELECT title, start_at::TEXT FROM calendar_items
+    `SELECT title, starts_at::TEXT FROM calendar_items
      WHERE user_id = $1 AND deleted_at IS NULL
-       AND start_at::DATE = $2
-     ORDER BY start_at
+       AND starts_at::DATE = $2
+     ORDER BY starts_at
      LIMIT 10`,
     [userId, today],
   );
 
   const { rows: habits } = await db.admin.query<HabitRow>(
-    `SELECT name, streak_current FROM habits
-     WHERE user_id = $1 AND deleted_at IS NULL AND is_active = TRUE
-     ORDER BY streak_current DESC
+    `SELECT title FROM habits
+     WHERE user_id = $1 AND deleted_at IS NULL
+     ORDER BY created_at
      LIMIT 8`,
     [userId],
   );
@@ -58,7 +58,7 @@ async function loadEveningData(userId: string) {
   const { rows } = await db.admin.query<SummaryRow>(
     `SELECT
        (SELECT COUNT(*) FROM items WHERE user_id = $1 AND deleted_at IS NULL AND status = 'done'   AND updated_at::DATE = $2)::INT AS completed,
-       (SELECT COUNT(*) FROM items WHERE user_id = $1 AND deleted_at IS NULL AND status != 'done'  AND due_date = $2)::INT AS pending,
+       (SELECT COUNT(*) FROM items WHERE user_id = $1 AND deleted_at IS NULL AND status != 'done'  AND due_at::DATE = $2)::INT AS pending,
        (SELECT COUNT(*) FROM habit_logs WHERE user_id = $1 AND logged_date = $2)::INT AS habit_completions`,
     [userId, today],
   );
@@ -71,9 +71,9 @@ async function loadEveningData(userId: string) {
 export async function generateMorningBriefing(userId: string): Promise<string> {
   const { tasks, events, habits } = await loadTodayData(userId);
 
-  const taskList   = tasks.map(t => `- ${t.title}${t.due_date ? ` (due ${t.due_date})` : ''}`).join('\n') || 'No pending tasks';
-  const eventList  = events.map(e => `- ${e.title} at ${e.start_at}`).join('\n') || 'No events today';
-  const habitList  = habits.map(h => `- ${h.name} (🔥 ${h.streak_current})`).join('\n') || 'No active habits';
+  const taskList   = tasks.map(t => `- ${t.title}${t.due_at ? ` (due ${t.due_at})` : ''}`).join('\n') || 'No pending tasks';
+  const eventList  = events.map(e => `- ${e.title} at ${e.starts_at}`).join('\n') || 'No events today';
+  const habitList  = habits.map(h => `- ${h.title}`).join('\n') || 'No active habits';
 
   const result = await groqChat([
     { role: 'system', content: 'You are a calm, concise personal assistant. Write a short morning briefing (3–4 sentences max) using the data below. Motivating but minimal.' },
