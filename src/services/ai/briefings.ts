@@ -20,7 +20,8 @@ interface HabitRow   { title: string }
 interface SummaryRow { completed: number; pending: number; habit_completions: number }
 
 async function loadTodayData(userId: string) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today    = new Date().toISOString().slice(0, 10);
+  const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
 
   const { rows: tasks } = await db.admin.query<TaskRow>(
     `SELECT title, due_at::TEXT FROM items
@@ -29,16 +30,16 @@ async function loadTodayData(userId: string) {
        AND (due_at IS NULL OR due_at::DATE <= $2)
      ORDER BY due_at NULLS LAST, created_at
      LIMIT 10`,
-    [userId, today],
+    [userId, tomorrow],
   );
 
   const { rows: events } = await db.admin.query<EventRow>(
     `SELECT title, starts_at::TEXT FROM calendar_items
      WHERE user_id = $1 AND deleted_at IS NULL
-       AND starts_at::DATE = $2
+       AND starts_at::DATE BETWEEN $2 AND $3
      ORDER BY starts_at
      LIMIT 10`,
-    [userId, today],
+    [userId, today, tomorrow],
   );
 
   const { rows: habits } = await db.admin.query<HabitRow>(
@@ -76,8 +77,8 @@ export async function generateMorningBriefing(userId: string): Promise<string> {
   const habitList  = habits.map(h => `- ${h.title}`).join('\n') || 'No active habits';
 
   const result = await groqChat([
-    { role: 'system', content: 'You are a calm, concise personal assistant. Write a short morning briefing (3–4 sentences max) using the data below. Motivating but minimal.' },
-    { role: 'user', content: `Tasks today:\n${taskList}\n\nCalendar:\n${eventList}\n\nHabits to keep:\n${habitList}` },
+    { role: 'system', content: 'You are a calm, concise personal assistant. Write a short briefing (3–5 sentences) using the data below. Mention upcoming exams or important events first, then tasks. Motivating but minimal.' },
+    { role: 'user', content: `Tasks (today + tomorrow):\n${taskList}\n\nCalendar (today + tomorrow):\n${eventList}\n\nHabits to keep:\n${habitList}` },
   ], { temperature: 0.6, maxTokens: 300 });
 
   return result.content;
