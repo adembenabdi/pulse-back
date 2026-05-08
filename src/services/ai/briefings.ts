@@ -19,27 +19,28 @@ interface EventRow   { title: string; starts_at: string }
 interface HabitRow   { title: string }
 interface SummaryRow { completed: number; pending: number; habit_completions: number }
 
-async function loadTodayData(userId: string) {
-  const today    = new Date().toISOString().slice(0, 10);
-  const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+async function loadTodayData(userId: string, timezone: string) {
+  const now      = new Date();
+  const today    = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+  const tomorrow = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(now.getTime() + 86_400_000));
 
   const { rows: tasks } = await db.admin.query<TaskRow>(
-    `SELECT title, due_at::TEXT FROM items
+    `SELECT title, (due_at AT TIME ZONE $3)::TEXT AS due_at FROM items
      WHERE user_id = $1 AND deleted_at IS NULL
        AND status   != 'done'
-       AND (due_at IS NULL OR due_at::DATE <= $2)
+       AND (due_at IS NULL OR due_at AT TIME ZONE $3 < ($2::date + interval '2 days'))
      ORDER BY due_at NULLS LAST, created_at
      LIMIT 10`,
-    [userId, tomorrow],
+    [userId, today, timezone],
   );
 
   const { rows: events } = await db.admin.query<EventRow>(
-    `SELECT title, starts_at::TEXT FROM calendar_items
+    `SELECT title, (starts_at AT TIME ZONE $3)::TEXT AS starts_at FROM calendar_items
      WHERE user_id = $1 AND deleted_at IS NULL
-       AND starts_at::DATE BETWEEN $2 AND $3
+       AND (starts_at AT TIME ZONE $3)::DATE BETWEEN $2::date AND ($2::date + interval '1 day')
      ORDER BY starts_at
      LIMIT 10`,
-    [userId, today, tomorrow],
+    [userId, today, timezone],
   );
 
   const { rows: habits } = await db.admin.query<HabitRow>(
@@ -69,8 +70,8 @@ async function loadEveningData(userId: string) {
 
 // ── Generators ────────────────────────────────────────────────────────────────
 
-export async function generateMorningBriefing(userId: string): Promise<string> {
-  const { tasks, events, habits } = await loadTodayData(userId);
+export async function generateMorningBriefing(userId: string, timezone = 'UTC'): Promise<string> {
+  const { tasks, events, habits } = await loadTodayData(userId, timezone);
 
   const taskList   = tasks.map(t => `- ${t.title}${t.due_at ? ` (due ${t.due_at})` : ''}`).join('\n') || 'No pending tasks';
   const eventList  = events.map(e => `- ${e.title} at ${e.starts_at}`).join('\n') || 'No events today';

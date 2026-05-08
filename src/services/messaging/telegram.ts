@@ -123,7 +123,7 @@ async function handleMessage(msg: TelegramBot.Message, updateId?: number): Promi
     }
 
     if (text === '/today' || text === '/morning') {
-      const briefing = await generateMorningBriefing(user.id);
+      const briefing = await generateMorningBriefing(user.id, user.timezone);
       await bot.sendMessage(chatId, briefing, { parse_mode: 'Markdown' });
       return;
     }
